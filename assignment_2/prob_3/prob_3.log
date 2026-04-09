@@ -1,0 +1,38 @@
+======================================================================
+prob_3.py  --  CACTI sweep: Access Time (ns) vs Cache Size
+Configurations: 5 sizes x 4 assoc = 20 total
+======================================================================
+
+[01/20]  16KB, 1-way           Access time = 0.7758 ns
+[02/20]  16KB, 2-way           Access time = 0.9689 ns
+[03/20]  16KB, 4-way           Access time = 1.3536 ns
+[04/20]  16KB, 8-way           Access time = 2.1802 ns
+[05/20]  32KB, 1-way           Access time = 0.9390 ns
+[06/20]  32KB, 2-way           Access time = 1.0104 ns
+[07/20]  32KB, 4-way           Access time = 1.3976 ns
+[08/20]  32KB, 8-way           Access time = 2.2937 ns
+[09/20]  64KB, 1-way           Access time = 1.2947 ns
+[10/20]  64KB, 2-way           Access time = 1.1256 ns
+[11/20]  64KB, 4-way           Access time = 1.5110 ns
+[12/20]  64KB, 8-way           Access time = 2.4258 ns
+[13/20]  128KB, 1-way          Access time = 1.4683 ns
+[14/20]  128KB, 2-way          Access time = 1.4710 ns
+[15/20]  128KB, 4-way          Access time = 1.5986 ns
+[16/20]  128KB, 8-way          Access time = 2.6583 ns
+[17/20]  256KB, 1-way          Access time = 1.9531 ns
+[18/20]  256KB, 2-way          Access time = 1.9559 ns
+[19/20]  256KB, 4-way          Access time = 1.9610 ns
+[20/20]  256KB, 8-way          Access time = 2.7787 ns
+
+======================================================================
+Summary Table
+======================================================================
+Cache Size         1-way       2-way       4-way       8-way
+------------------------------------------------------------
+16 KB            0.7758      0.9689      1.3536      2.1802 
+32 KB            0.9390      1.0104      1.3976      2.2937 
+64 KB            1.2947      1.1256      1.5110      2.4258 
+128 KB           1.4683      1.4710      1.5986      2.6583 
+256 KB           1.9531      1.9559      1.9610      2.7787 
+
+Plot saved to /home/rtx3060/assignment_2/prob_3/prob_3_plot.png
