@@ -1,5 +1,4 @@
 DOCS Assignments Autumn 2026 IITKGP
 
-Sumit 
-Jatin
-Soham
+Sumit Kumar ( 22CS30056)
+Jatin Mahawar (22CS30032)
