@@ -622,6 +622,10 @@ typedef struct Proto {
   LocVar *locvars;  /* information about local variables (debug information) */
   TString  *source;  /* used for debug information */
   GCObject *gclist;
+  lu_byte *arenapc;  /* NULL, or one flag per 'code' slot: nonzero means
+                        the OP_NEWTABLE at that pc was proven non-escaping
+                        by the Part C.1 analysis and may be frame-arena
+                        allocated (Part C.2) */
 } Proto;
 
 /* }================================================================== */

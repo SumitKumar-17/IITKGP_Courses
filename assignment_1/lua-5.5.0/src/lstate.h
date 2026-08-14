@@ -184,6 +184,20 @@ typedef struct stringtable {
 ** - field 'nres' is used only while closing tbc variables when
 ** returning from a function;
 */
+/*
+** A frame-arena block (Part C.2): a plain bump allocator, chained if a
+** frame needs more than one. Objects handed out of it are never linked
+** into any GC list (see 'luaC_newarenaobj' in lgc.c) and are reclaimed
+** in bulk, by simply forgetting the whole chain, when their owning
+** call frame returns ('luaC_freearena', called from 'luaD_poscall').
+*/
+typedef struct ArenaBlock {
+  struct ArenaBlock *next;
+  size_t used;
+  size_t size;
+} ArenaBlock;
+
+
 struct CallInfo {
   StkIdRel func;  /* function index in the stack */
   StkIdRel top;  /* top for this function */
@@ -193,6 +207,7 @@ struct CallInfo {
       const Instruction *savedpc;
       volatile l_signalT trap;  /* function is tracing lines/counts */
       int nextraargs;  /* # of extra arguments in vararg functions */
+      ArenaBlock *arena;  /* this frame's bump arena, or NULL if unused */
     } l;
     struct {  /* only for C functions */
       lua_KFunction k;  /* continuation in case of yields */
@@ -352,6 +367,9 @@ typedef struct global_State {
   GCObject *allweak;  /* list of all-weak tables */
   GCObject *tobefnz;  /* list of userdata to be GC */
   GCObject *fixedgc;  /* list of objects not to be collected */
+  ArenaBlock *arenafree;  /* one spare frame-arena block, kept around to
+                             avoid a malloc/free pair on every call that
+                             uses one (Part C.2) */
   /* fields for generational collector */
   GCObject *survival;  /* start of objects that survived one GC cycle */
   GCObject *old1;  /* start of old1 objects */

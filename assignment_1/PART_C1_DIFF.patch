@@ -1,0 +1,507 @@
+diff --git a/assignment_1/lua-5.5.0/src/lfunc.c b/assignment_1/lua-5.5.0/src/lfunc.c
+index b6fd9ce..87feba5 100644
+--- a/assignment_1/lua-5.5.0/src/lfunc.c
++++ b/assignment_1/lua-5.5.0/src/lfunc.c
+@@ -263,6 +263,7 @@ Proto *luaF_newproto (lua_State *L) {
+   f->linedefined = 0;
+   f->lastlinedefined = 0;
+   f->source = NULL;
++  f->arenapc = NULL;
+   return f;
+ }
+ 
+@@ -292,6 +293,8 @@ void luaF_freeproto (lua_State *L, Proto *f) {
+   luaM_freearray(L, f->k, cast_sizet(f->sizek));
+   luaM_freearray(L, f->locvars, cast_sizet(f->sizelocvars));
+   luaM_freearray(L, f->upvalues, cast_sizet(f->sizeupvalues));
++  if (f->arenapc)
++    luaM_freearray(L, f->arenapc, cast_sizet(f->sizecode));
+   luaM_free(L, f);
+ }
+ 
+diff --git a/assignment_1/lua-5.5.0/src/lobject.h b/assignment_1/lua-5.5.0/src/lobject.h
+index 156c942..6edc334 100644
+--- a/assignment_1/lua-5.5.0/src/lobject.h
++++ b/assignment_1/lua-5.5.0/src/lobject.h
+@@ -622,6 +622,10 @@ typedef struct Proto {
+   LocVar *locvars;  /* information about local variables (debug information) */
+   TString  *source;  /* used for debug information */
+   GCObject *gclist;
++  lu_byte *arenapc;  /* NULL, or one flag per 'code' slot: nonzero means
++                        the OP_NEWTABLE at that pc was proven non-escaping
++                        by the Part C.1 analysis and may be frame-arena
++                        allocated (Part C.2) */
+ } Proto;
+ 
+ /* }================================================================== */
+diff --git a/assignment_1/lua-5.5.0/src/lparser.c b/assignment_1/lua-5.5.0/src/lparser.c
+index b3855d4..6d53589 100644
+--- a/assignment_1/lua-5.5.0/src/lparser.c
++++ b/assignment_1/lua-5.5.0/src/lparser.c
+@@ -11,6 +11,8 @@
+ 
+ 
+ #include <limits.h>
++#include <stdio.h>
++#include <stdlib.h>
+ #include <string.h>
+ 
+ #include "lua.h"
+@@ -30,9 +32,8 @@
+ 
+ 
+ 
+-/* maximum number of variable declarations per function (must be
+-   smaller than 250, due to the bytecode format) */
+-#define MAXVARS		200
++/* MAXVARS: see lparser.h (also used to size the escape-analysis
++   candidate tables, so it now lives next to FuncState) */
+ 
+ 
+ #define hasmultret(k)		((k) == VCALL || (k) == VVARARG)
+@@ -252,6 +253,108 @@ lu_byte luaY_nvarstack (FuncState *fs) {
+ }
+ 
+ 
++/*
++** {======================================================================
++** Static escape analysis for stack promotion (Part C.1).
++**
++** A candidate is a local declared as 'local t = {...}' with nothing else
++** on that line: 'constructor' remembers the register/pc of every table
++** it just built (in 'ctorpend', cleared per statement by 'localstat'),
++** and 'localstat' turns one into a real candidate in 'tcand' once it
++** sees which local it was bound to. From there a candidate starts
++** non-escaping and only ever moves to escaping, via whichever of the
++** four rules below notices it first:
++**   1. returned                       -> retstat + explist
++**   2. captured by a nested closure   -> singlevaraux (the existing
++**                                         upvalue-capture check)
++**   3. stored into an escaping table  -> restassign (recorded as a
++**                                         dependency, resolved below)
++**   4. passed to a non-whitelisted
++**      call                           -> suffixedexp + funcargs
++** Rule 3 can only be resolved once the *container's* own fate is known,
++** which may be later in the same function, so it is recorded as a
++** "from escapes if to escapes" edge and settled by a fixed point in
++** close_func, once the whole function body has been seen.
++*/
++
++static int findcandidx (FuncState *fs, int vidx) {
++  int i;
++  for (i = fs->ntcand - 1; i >= 0; i--)
++    if (fs->tcand[i].vidx == vidx)
++      return i;
++  return -1;
++}
++
++
++static int findcandbyreg (FuncState *fs, int reg) {
++  int i;
++  for (i = fs->ntcand - 1; i >= 0; i--)
++    if (getlocalvardesc(fs, fs->tcand[i].vidx)->vd.ridx == reg)
++      return i;
++  return -1;
++}
++
++
++/* rules 1, 2 and 4: an outright, unconditional escape */
++static void escapecand (FuncState *fs, int vidx) {
++  int i = findcandidx(fs, vidx);
++  if (i >= 0)
++    fs->tcand[i].escapes = 1;
++}
++
++
++/* checked on every list item explist discharges, and on the trailing
++   one by each of retstat/funcargs/restassign; only fires while the
++   caller has flagged the list as an escaping context */
++static void checkescape (FuncState *fs, expdesc *v) {
++  if (fs->escapectx && v->k == VLOCAL)
++    escapecand(fs, v->u.var.vidx);
++}
++
++
++/* rule 3: 'dst' just received 'src'. A plain variable target is treated
++   as aliasing (conservatively escaping, since it isn't tracked further);
++   an indexed target escapes 'src' only if the container isn't itself a
++   still-non-escaping candidate, in which case the dependency is queued
++   instead of decided outright. */
++static void checkstoreescape (FuncState *fs, expdesc *dst, expdesc *src) {
++  int srci;
++  if (src->k != VLOCAL)
++    return;
++  srci = findcandidx(fs, src->u.var.vidx);
++  if (srci < 0)
++    return;
++  if (!vkisindexed(dst->k))
++    fs->tcand[srci].escapes = 1;  /* aliased to another variable */
++  else if (dst->k == VINDEXUP)
++    fs->tcand[srci].escapes = 1;  /* container is an upvalue */
++  else {
++    int ci = findcandbyreg(fs, dst->u.ind.t);
++    if (ci < 0)
++      fs->tcand[srci].escapes = 1;  /* container isn't a tracked candidate */
++    else if (ci != srci && fs->ntcedge < MAXTCAND)
++      fs->tcedge[fs->ntcedge++] = (TCEdge){cast(short, srci), cast(short, ci)};
++  }
++}
++
++
++/* rule 4's whitelist. 'type'/'print' never retain their argument, so
++   they're safe as an ordinary call anywhere; 'pairs'/'ipairs' return
++   the table itself as part of their result, so they're only safe in
++   the one place that result can't outlive the frame: the control
++   expression of a generic for loop. */
++static int escapewhitelisted (FuncState *fs, TString *name) {
++  const char *s = name ? getstr(name) : "";
++  if (strcmp(s, "type") == 0 || strcmp(s, "print") == 0)
++    return 1;
++  if (fs->inforctl && (strcmp(s, "pairs") == 0 || strcmp(s, "ipairs") == 0))
++    return 1;
++  return 0;
++}
++
++/* }====================================================================== */
++
++
+ /*
+ ** Get the debug-information entry for current variable 'vidx'.
+ */
+@@ -479,8 +582,10 @@ static void singlevaraux (FuncState *fs, TString *n, expdesc *var, int base) {
+     if (!base) {
+       if (var->k == VVARGVAR)  /* vararg parameter? */
+         luaK_vapar2local(fs, var);  /* change it to a regular local */
+-      if (var->k == VLOCAL)
++      if (var->k == VLOCAL) {
+         markupval(fs, var->u.var.vidx);  /* will be used as an upvalue */
++        escapecand(fs, var->u.var.vidx);  /* rule 2: capture-escape */
++      }
+     }
+     /* else nothing else to be done */
+   }
+@@ -536,7 +641,17 @@ static void buildvar (LexState *ls, TString *varname, expdesc *var) {
+ 
+ 
+ static void singlevar (LexState *ls, expdesc *var) {
+-  buildvar(ls, str_checkname(ls), var);
++  FuncState *fs = ls->fs;
++  TString *n = str_checkname(ls);
++  buildvar(ls, n, var);
++  /* for the call-escape whitelist, in case this turns out to be the
++     callee of a following call. 'buildvar' rewrites a real global's
++     'var->k' away from VGLOBAL into an indexed access through _ENV, so
++     "was this a global" has to be read off right here, from what it
++     settled on, rather than checked later against VGLOBAL itself */
++  fs->lastname = n;
++  fs->lastwasglobal = !(var->k == VLOCAL || var->k == VUPVAL ||
++                         var->k == VCONST);
+ }
+ 
+ 
+@@ -814,6 +929,11 @@ static void open_func (LexState *ls, FuncState *fs, BlockCnt *bl) {
+   fs->ndebugvars = 0;
+   fs->nactvar = 0;
+   fs->needclose = 0;
++  fs->escapectx = 0;
++  fs->inforctl = 0;
++  fs->nctorpend = 0;
++  fs->ntcand = 0;
++  fs->ntcedge = 0;
+   fs->firstlocal = ls->dyd->actvar.n;
+   fs->firstlabel = ls->dyd->label.n;
+   fs->bl = NULL;
+@@ -843,6 +963,39 @@ static void close_func (LexState *ls) {
+   luaM_shrinkvector(L, f->p, f->sizep, fs->np, Proto *);
+   luaM_shrinkvector(L, f->locvars, f->sizelocvars, fs->ndebugvars, LocVar);
+   luaM_shrinkvector(L, f->upvalues, f->sizeupvalues, fs->nups, Upvaldesc);
++  if (fs->ntcand > 0) {
++    int i, changed;
++    do {  /* settle rule-3 dependencies now that every direct escape
++             (rules 1, 2, 4, and the precise half of rule 3) is known.
++             'from'/'to' are indices into 'tcand' itself (that's what
++             'checkstoreescape' recorded them as), not vidx values. */
++      changed = 0;
++      for (i = 0; i < fs->ntcedge; i++) {
++        int fi = fs->tcedge[i].from, ti = fs->tcedge[i].to;
++        if (fs->tcand[ti].escapes && !fs->tcand[fi].escapes) {
++          fs->tcand[fi].escapes = 1;
++          changed = 1;
++        }
++      }
++    } while (changed);
++    for (i = 0; i < fs->ntcand; i++) {
++      if (fs->tcand[i].escapes)
++        continue;
++      if (f->arenapc == NULL) {
++        f->arenapc = luaM_newvector(L, cast_sizet(f->sizecode), lu_byte);
++        memset(f->arenapc, 0, cast_sizet(f->sizecode) * sizeof(lu_byte));
++      }
++      f->arenapc[fs->tcand[i].pc] = 1;  /* provably non-escaping */
++    }
++    if (getenv("LUA_ESCDEBUG")) {  /* opt-in diagnostic, see README.md */
++      int i2;
++      for (i2 = 0; i2 < fs->ntcand; i2++)
++        fprintf(stderr, "escape-analysis: %s, local '%s' (pc %d): %s\n",
++                getstr(f->source), getstr(getlocalvardesc(fs, fs->tcand[i2].vidx)->vd.name),
++                fs->tcand[i2].pc,
++                fs->tcand[i2].escapes ? "escapes (heap)" : "promoted (arena)");
++    }
++  }
+   ls->fs = fs->prev;
+   L->top.p--;  /* pop kcache table */
+   luaC_checkGC(L);
+@@ -947,6 +1100,7 @@ static void recfield (LexState *ls, ConsControl *cc) {
+   tab = *cc->t;
+   luaK_indexed(fs, &tab, &key);
+   expr(ls, &val);
++  checkstoreescape(fs, &tab, &val);  /* rule 3 */
+   luaK_storevar(fs, &tab, &val);
+   fs->freereg = reg;  /* free registers */
+ }
+@@ -1051,6 +1205,13 @@ static void constructor (LexState *ls, expdesc *t) {
+   check_match(ls, /*{*/ '}', '{' /*}*/, line);
+   lastlistfield(fs, &cc);
+   luaK_settablesize(fs, pc, t->u.info, cc.na, cc.nh);
++  /* remember this constructor; 'localstat' will confirm it as a
++     candidate if (and only if) it turns out to be 'local t = {...}' */
++  if (fs->nctorpend < MAXCTORPEND) {
++    fs->ctorpend[fs->nctorpend].reg = cast_byte(t->u.info);
++    fs->ctorpend[fs->nctorpend].pc = pc;
++    fs->nctorpend++;
++  }
+ }
+ 
+ /* }====================================================================== */
+@@ -1127,6 +1288,7 @@ static int explist (LexState *ls, expdesc *v) {
+   int n = 1;  /* at least one expression */
+   expr(ls, v);
+   while (testnext(ls, ',')) {
++    checkescape(ls->fs, v);  /* about to leave this item behind */
+     luaK_exp2nextreg(ls->fs, v);
+     expr(ls, v);
+     n++;
+@@ -1147,6 +1309,7 @@ static void funcargs (LexState *ls, expdesc *f) {
+         args.k = VVOID;
+       else {
+         explist(ls, &args);
++        checkescape(fs, &args);  /* explist only checked the earlier ones */
+         if (hasmultret(args.k))
+           luaK_setmultret(fs, &args);
+       }
+@@ -1201,6 +1364,8 @@ static void primaryexp (LexState *ls, expdesc *v) {
+       expr(ls, v);
+       check_match(ls, ')', '(', line);
+       luaK_dischargevars(ls->fs, v);
++      ls->fs->lastwasglobal = 0;  /* '(f)(x)' is not a whitelistable call,
++                                     even if 'f' would have been */
+       return;
+     }
+     case TK_NAME: {
+@@ -1218,11 +1383,17 @@ static void suffixedexp (LexState *ls, expdesc *v) {
+   /* suffixedexp ->
+        primaryexp { '.' NAME | '[' exp ']' | ':' NAME funcargs | funcargs } */
+   FuncState *fs = ls->fs;
++  /* true only while 'v' is still exactly the bare name primaryexp just
++     produced; any suffix at all turns it into something else, so a
++     call can only be whitelisted on the suffix right after that name */
++  int barename;
+   primaryexp(ls, v);
++  barename = fs->lastwasglobal;
+   for (;;) {
+     switch (ls->t.token) {
+       case '.': {  /* fieldsel */
+         fieldsel(ls, v);
++        barename = 0;
+         break;
+       }
+       case '[': {  /* '[' exp ']' */
+@@ -1230,19 +1401,29 @@ static void suffixedexp (LexState *ls, expdesc *v) {
+         luaK_exp2anyregup(fs, v);
+         yindex(ls, &key);
+         luaK_indexed(fs, v, &key);
++        barename = 0;
+         break;
+       }
+       case ':': {  /* ':' NAME funcargs */
+         expdesc key;
++        lu_byte savectx = fs->escapectx;
+         luaX_next(ls);
+         codename(ls, &key);
+         luaK_self(fs, v, &key);
++        fs->escapectx = 1;  /* rule 4: method calls are never whitelisted */
+         funcargs(ls, v);
++        fs->escapectx = savectx;
++        barename = 0;
+         break;
+       }
+       case '(': case TK_STRING: case '{' /*}*/: {  /* funcargs */
++        lu_byte savectx = fs->escapectx;
++        int whitelisted = (barename && escapewhitelisted(fs, fs->lastname));
+         luaK_exp2nextreg(fs, v);
++        fs->escapectx = !whitelisted;  /* rule 4 */
+         funcargs(ls, v);
++        fs->escapectx = savectx;
++        barename = 0;
+         break;
+       }
+       default: return;
+@@ -1510,13 +1691,23 @@ static void restassign (LexState *ls, struct LHS_assign *lh, int nvars) {
+     leavelevel(ls);
+   }
+   else {  /* restassign -> '=' explist */
++    FuncState *fs = ls->fs;
+     int nexps;
++    lu_byte savectx = fs->escapectx;
+     checknext(ls, '=');
++    /* conservative for every item except the last: an exact single
++       target/value pairing (the common case) gets the precise rule-3
++       check below instead, once the last expression is in hand */
++    fs->escapectx = 1;
+     nexps = explist(ls, &e);
+-    if (nexps != nvars)
++    fs->escapectx = savectx;
++    if (nexps != nvars) {
++      checkescape(fs, &e);  /* no precise pairing possible here either */
+       adjust_assign(ls, nvars, nexps, &e);
++    }
+     else {
+       luaK_setoneret(ls->fs, &e);  /* close last expression */
++      checkstoreescape(fs, &lh->v, &e);  /* rule 3, precisely */
+       luaK_storevar(ls->fs, &lh->v, &e);
+       return;  /* avoid default */
+     }
+@@ -1723,7 +1914,9 @@ static void forlist (LexState *ls, TString *indexname) {
+   }
+   checknext(ls, TK_IN);
+   line = ls->linenumber;
++  fs->inforctl = 1;  /* rule 4: pairs/ipairs are safe only right here */
+   adjust_assign(ls, 4, explist(ls, &e), &e);
++  fs->inforctl = 0;
+   adjustlocalvars(ls, 3);  /* start scope for internal variables */
+   marktobeclosed(fs);  /* last internal var. must be closed */
+   luaK_checkstack(fs, 2);  /* extra space to call iterator */
+@@ -1824,6 +2017,8 @@ static void localstat (LexState *ls) {
+   int nvars = 0;
+   int nexps;
+   expdesc e;
++  /* any pending table constructor belongs to an earlier statement now */
++  fs->nctorpend = 0;
+   /* get prefixed attribute (if any); default is regular local variable */
+   lu_byte defkind = getvarattribute(ls, VDKREG);
+   do {  /* for each variable */
+@@ -1837,8 +2032,18 @@ static void localstat (LexState *ls) {
+     }
+     nvars++;
+   } while (testnext(ls, ','));
+-  if (testnext(ls, '='))  /* initialization? */
++  if (testnext(ls, '=')) {  /* initialization? */
++    /* conservative: 'local a = t' aliases whatever 't' is, so a bare
++       candidate reference here has to escape too, exactly as if it had
++       been assigned to an existing variable (which is what this is).
++       A fresh 'local t = {...}' is unaffected: a constructor is never
++       VLOCAL, so this never fires for the constructor confirmed below. */
++    lu_byte savectx = fs->escapectx;
++    fs->escapectx = 1;
+     nexps = explist(ls, &e);
++    checkescape(fs, &e);
++    fs->escapectx = savectx;
++  }
+   else {
+     e.k = VVOID;
+     nexps = 0;
+@@ -1854,6 +2059,19 @@ static void localstat (LexState *ls) {
+   else {
+     adjust_assign(ls, nvars, nexps, &e);
+     adjustlocalvars(ls, nvars);
++    /* exactly 'local name = {...}': confirm it as an escape-analysis
++       candidate if the single expression really was that constructor
++       (and not, say, a call or an existing variable) */
++    if (nvars == 1 && nexps == 1 && fs->nctorpend > 0) {
++      lu_byte ridx = getlocalvardesc(fs, fs->nactvar - 1)->vd.ridx;
++      CtorPend *pend = &fs->ctorpend[fs->nctorpend - 1];
++      if (pend->reg == ridx && fs->ntcand < MAXTCAND) {
++        TCand *c = &fs->tcand[fs->ntcand++];
++        c->vidx = cast(short, fs->nactvar - 1);
++        c->pc = pend->pc;
++        c->escapes = 0;
++      }
++    }
+   }
+   checktoclose(fs, toclose);
+ }
+@@ -2023,7 +2241,11 @@ static void retstat (LexState *ls) {
+   if (block_follow(ls, 1) || ls->t.token == ';')
+     nret = 0;  /* return no values */
+   else {
++    lu_byte savectx = fs->escapectx;
++    fs->escapectx = 1;  /* rule 1: anything in this list escapes */
+     nret = explist(ls, &e);  /* optional return values */
++    checkescape(fs, &e);  /* explist only checked the non-trailing items */
++    fs->escapectx = savectx;
+     if (hasmultret(e.k)) {
+       luaK_setmultret(fs, &e);
+       if (e.k == VCALL && nret == 1 && !fs->bl->insidetbc) {  /* tail call? */
+diff --git a/assignment_1/lua-5.5.0/src/lparser.h b/assignment_1/lua-5.5.0/src/lparser.h
+index a30df04..613a327 100644
+--- a/assignment_1/lua-5.5.0/src/lparser.h
++++ b/assignment_1/lua-5.5.0/src/lparser.h
+@@ -162,6 +162,39 @@ typedef struct Dyndata {
+ struct BlockCnt;  /* defined in lparser.c */
+ 
+ 
++/* maximum number of local variables per function (must fit in a short) */
++#define MAXVARS		200
++
++/* maximum table-constructor sites tracked as escape-analysis candidates
++   in one function; bounded by MAXVARS since a candidate is always some
++   function's local variable */
++#define MAXTCAND	MAXVARS
++
++/* maximum table constructors still unbound to a local within the
++   statement currently being parsed (e.g. 'local a, b = {}, {}') */
++#define MAXCTORPEND	16
++
++
++/* a local table constructor not yet proven to escape its frame */
++typedef struct TCand {
++  short vidx;       /* index of the local it got bound to, in actvar.arr */
++  int pc;           /* pc of the OP_NEWTABLE that created it */
++  lu_byte escapes;  /* set once any of the four escape rules fires */
++} TCand;
++
++/* "if 'from' escapes, 'to' must escape too", recorded when a candidate
++   is stored into another one and resolved once the function is done */
++typedef struct TCEdge {
++  short from, to;
++} TCEdge;
++
++/* a table constructor seen but not yet bound to a local (or discarded) */
++typedef struct CtorPend {
++  lu_byte reg;
++  int pc;
++} CtorPend;
++
++
+ /* state needed to generate code for a given function */
+ typedef struct FuncState {
+   Proto *f;  /* current function header */
+@@ -183,6 +216,18 @@ typedef struct FuncState {
+   lu_byte freereg;  /* first free register */
+   lu_byte iwthabs;  /* instructions issued since last absolute line info */
+   lu_byte needclose;  /* function needs to close upvalues when returning */
++  /* --- static escape analysis for stack promotion (Part C.1) --- */
++  TString *lastname;  /* name most recently resolved by 'singlevar' */
++  lu_byte lastwasglobal;  /* true if that name resolved to a global,
++                             i.e. wasn't shadowed by a local or upvalue */
++  lu_byte escapectx;  /* >0: a bare local seen right now should escape */
++  lu_byte inforctl;  /* parsing the 'in explist' of a generic for loop */
++  lu_byte nctorpend;  /* table constructors not yet bound to a local */
++  CtorPend ctorpend[MAXCTORPEND];
++  int ntcand;  /* active table-local candidates in this function */
++  TCand tcand[MAXTCAND];
++  int ntcedge;  /* pending "from escapes if to escapes" dependencies */
++  TCEdge tcedge[MAXTCAND];
+ } FuncState;
+ 
+ 

@@ -1,0 +1,73 @@
+atomic
+atomic2gen
+callallpendingfinalizers
+checkmajorminor
+checkminormajor
+checkpointer
+checkSizes
+clearbykeys
+clearbyvalues
+cleargraylists
+clearkey
+convergeephemerons
+correctgraylists
+correctpointers
+deletelist
+dothecall
+entergen
+entersweep
+finishgencycle
+freeobj
+freeupval
+fullgen
+fullinc
+GCObject *luaC_newobj (
+GCObject *luaC_newobjdt (
+genlink
+getmode
+incstep
+iscleared
+linkgclist_
+luaC_barrier_
+luaC_barrierback_
+luaC_changemode
+luaC_checkfinalizer
+luaC_fix
+luaC_freeallobjects
+luaC_fullgc
+luaC_runtilstate
+luaC_step
+markbeingfnz
+markmt
+markold
+minor2inc
+objsize
+propagateall
+propagatemark
+reallymarkobject
+remarkupvals
+restartcollection
+separatetobefnz
+setminordebt
+setpause
+singlestep
+static GCObject **correctgraylist (
+static GCObject **findlast (
+static GCObject **getgclist (
+static GCObject **sweepgen (
+static GCObject **sweeplist (
+static GCObject **sweeptolive (
+static GCObject *udata2finalize (
+sweep2old
+sweepstep
+traversearray
+traverseCclosure
+traverseephemeron
+traverseLclosure
+traverseproto
+traversestrongtable
+traversetable
+traversethread
+traverseudata
+traverseweakvalue
+youngcollection

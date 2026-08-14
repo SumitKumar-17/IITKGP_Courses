@@ -1,0 +1,522 @@
+diff --git a/assignment_1/lua-5.5.0/src/ldo.c b/assignment_1/lua-5.5.0/src/ldo.c
+index 6d0184e..d40befa 100644
+--- a/assignment_1/lua-5.5.0/src/ldo.c
++++ b/assignment_1/lua-5.5.0/src/ldo.c
+@@ -611,6 +611,8 @@ void luaD_poscall (lua_State *L, CallInfo *ci, int nres) {
+   /* function cannot be in any of these cases when returning */
+   lua_assert(!(ci->callstatus &
+         (CIST_HOOKED | CIST_YPCALL | CIST_FIN | CIST_CLSRET)));
++  if (!(ci->callstatus & CIST_C) && ci->u.l.arena != NULL)
++    luaC_freearena(L, ci);  /* Part C.2: drop this frame's arena tables */
+   L->ci = ci->previous;  /* back to caller (after closing variables) */
+ }
+ 
+@@ -689,7 +691,15 @@ int luaD_pretailcall (lua_State *L, CallInfo *ci, StkId func,
+         setnilvalue(s2v(func + narg1));  /* complete missing arguments */
+       ci->top.p = func + 1 + fsize;  /* top for new function */
+       lua_assert(ci->top.p <= L->stack_last.p);
++      if (ci->u.l.arena != NULL)  /* Part C.2: the tail call ends this
++                                     frame; 'ci' is about to be reused
++                                     for the new one, so its arena has
++                                     to go now, not at some later
++                                     'luaD_poscall' that will never see
++                                     this frame again */
++        luaC_freearena(L, ci);
+       ci->u.l.savedpc = p->code;  /* starting point */
++      ci->u.l.arena = NULL;
+       ci->callstatus |= CIST_TAIL;
+       L->top.p = func + narg1;  /* set top */
+       return -1;
+@@ -732,6 +742,7 @@ CallInfo *luaD_precall (lua_State *L, StkId func, int nresults) {
+       checkstackp(L, fsize, func);
+       L->ci = ci = prepCallInfo(L, func, status, func + 1 + fsize);
+       ci->u.l.savedpc = p->code;  /* starting point */
++      ci->u.l.arena = NULL;  /* Part C.2: no frame arena until first use */
+       for (; narg < nfixparams; narg++)
+         setnilvalue(s2v(L->top.p++));  /* complete missing arguments */
+       lua_assert(ci->top.p <= L->stack_last.p);
+@@ -1034,6 +1045,22 @@ LUA_API int lua_yieldk (lua_State *L, int nresults, lua_KContext ctx,
+ }
+ 
+ 
++/*
++** Part C.2: an error longjmps straight past 'luaD_poscall' for every
++** frame between where it happened and the protected boundary that
++** catches it, so their arenas (if any) would otherwise never be freed.
++** Walk exactly those frames -- from the current 'L->ci' up to (but not
++** including) 'stop', the ci being restored to -- before it's dropped.
++*/
++static void freearenas (lua_State *L, CallInfo *stop) {
++  CallInfo *ci;
++  for (ci = L->ci; ci != stop; ci = ci->previous) {
++    if (!(ci->callstatus & CIST_C) && ci->u.l.arena != NULL)
++      luaC_freearena(L, ci);
++  }
++}
++
++
+ /*
+ ** Auxiliary structure to call 'luaF_close' in protected mode.
+ */
+@@ -1066,6 +1093,7 @@ TStatus luaD_closeprotected (lua_State *L, ptrdiff_t level, TStatus status) {
+     if (l_likely(status == LUA_OK))  /* no more errors? */
+       return pcl.status;
+     else {  /* an error occurred; restore saved state and repeat */
++      freearenas(L, old_ci);  /* Part C.2: these frames skip luaD_poscall */
+       L->ci = old_ci;
+       L->allowhook = old_allowhooks;
+     }
+@@ -1087,6 +1115,7 @@ TStatus luaD_pcall (lua_State *L, Pfunc func, void *u, ptrdiff_t old_top,
+   L->errfunc = ef;
+   status = luaD_rawrunprotected(L, func, u);
+   if (l_unlikely(status != LUA_OK)) {  /* an error occurred? */
++    freearenas(L, old_ci);  /* Part C.2: these frames skip luaD_poscall */
+     L->ci = old_ci;
+     L->allowhook = old_allowhooks;
+     status = luaD_closeprotected(L, old_top, status);
+diff --git a/assignment_1/lua-5.5.0/src/lfunc.c b/assignment_1/lua-5.5.0/src/lfunc.c
+index b6fd9ce..87feba5 100644
+--- a/assignment_1/lua-5.5.0/src/lfunc.c
++++ b/assignment_1/lua-5.5.0/src/lfunc.c
+@@ -263,6 +263,7 @@ Proto *luaF_newproto (lua_State *L) {
+   f->linedefined = 0;
+   f->lastlinedefined = 0;
+   f->source = NULL;
++  f->arenapc = NULL;
+   return f;
+ }
+ 
+@@ -292,6 +293,8 @@ void luaF_freeproto (lua_State *L, Proto *f) {
+   luaM_freearray(L, f->k, cast_sizet(f->sizek));
+   luaM_freearray(L, f->locvars, cast_sizet(f->sizelocvars));
+   luaM_freearray(L, f->upvalues, cast_sizet(f->sizeupvalues));
++  if (f->arenapc)
++    luaM_freearray(L, f->arenapc, cast_sizet(f->sizecode));
+   luaM_free(L, f);
+ }
+ 
+diff --git a/assignment_1/lua-5.5.0/src/lgc.c b/assignment_1/lua-5.5.0/src/lgc.c
+index c64d74b..aed955a 100644
+--- a/assignment_1/lua-5.5.0/src/lgc.c
++++ b/assignment_1/lua-5.5.0/src/lgc.c
+@@ -30,8 +30,14 @@
+ ** Maximum number of elements to sweep in each single step.
+ ** (Large enough to dissipate fixed overheads but small enough
+ ** to allow small steps for the collector.)
++** Tunable at runtime through lua_setsweepstep; keeps the original
++** value as its default so behaviour is unchanged until someone calls it.
+ */
+-#define GCSWEEPMAX	20
++#define GCSWEEPMAX_DEFAULT	20
++
++static int gcsweepmax = GCSWEEPMAX_DEFAULT;
++
++#define GCSWEEPMAX	gcsweepmax
+ 
+ 
+ /*
+@@ -306,6 +312,124 @@ GCObject *luaC_newobjdt (lua_State *L, lu_byte tt, size_t sz, size_t offset) {
+ }
+ 
+ 
++/*
++** {======================================================================
++** Frame-arena allocation (Part C.2).
++**
++** An arena object is a completely ordinary GCObject -- same header,
++** same white/black bookkeeping -- except its 'next' link is left NULL,
++** so it is never part of 'allgc' (or any other sweep list) and
++** 'sweepgc'/'sweeplist' never sees it, let alone frees it. It is still
++** found and traversed by the mark phase like anything else reachable
++** from the stack, which is what keeps whatever it points to (a string
++** value, a nested table, ...) correctly alive; it is simply never
++** *swept*. Its memory is reclaimed in one shot, by 'luaC_freearena',
++** when the call frame that owns it returns.
++*/
++
++#define ARENABLOCKSIZE	((size_t)4096)
++
++static ArenaBlock *arena_newblock (lua_State *L, size_t need) {
++  global_State *g = G(L);
++  size_t bsize = (need > ARENABLOCKSIZE) ? need : ARENABLOCKSIZE;
++  ArenaBlock *b;
++  if (g->arenafree != NULL && g->arenafree->size >= bsize) {
++    b = g->arenafree;
++    g->arenafree = NULL;
++  }
++  else {
++    b = cast(ArenaBlock *, luaM_malloc_(L, sizeof(ArenaBlock) + bsize, 0));
++    b->size = bsize;
++  }
++  b->used = 0;
++  return b;
++}
++
++
++static void *arena_alloc (lua_State *L, CallInfo *ci, size_t sz) {
++  ArenaBlock *b = ci->u.l.arena;
++  sz = (sz + sizeof(l_mem) - 1) & ~(sizeof(l_mem) - 1);  /* align up */
++  if (b == NULL || b->used + sz > b->size) {
++    ArenaBlock *nb = arena_newblock(L, sz);
++    nb->next = b;  /* chain behind whatever this frame already had */
++    ci->u.l.arena = b = nb;
++  }
++  {
++    char *p = cast_charp(b) + sizeof(ArenaBlock) + b->used;
++    b->used += sz;
++    return p;
++  }
++}
++
++
++/*
++** Bump-allocate a GCObject out of the current Lua frame's arena instead
++** of the regular heap. Correctness depends only on two things: the
++** object is a legitimate white GCObject when created (so mark-phase
++** stack scanning treats it exactly like any other reachable value),
++** and 'o->next' is NULL (so sweep code, which only ever walks list
++** links, can never reach it).
++*/
++GCObject *luaC_newarenaobj (lua_State *L, CallInfo *ci, lu_byte tt, size_t sz) {
++  global_State *g = G(L);
++  GCObject *o = cast(GCObject *, arena_alloc(L, ci, sz));
++  o->marked = luaC_white(g);
++  o->tt = tt;
++  o->next = NULL;
++  return o;
++}
++
++
++/*
++** Release a frame's arena in bulk when it returns. The most recently
++** used block is kept as a spare (one per Lua state) to save the next
++** frame that needs one a malloc/free round trip; everything else is
++** freed outright.
++*/
++/*
++** A Table's own struct lives in the arena, but its array/hash parts
++** are ordinary heap blocks it merely points to (grown via the exact
++** same 'luaH_resize'/'luaH_newkey' every table uses) -- freeing (or
++** recycling) the block that holds the struct doesn't touch those, so
++** they have to be let go explicitly here, one table at a time, before
++** the block itself is dropped or handed back for reuse.
++*/
++static void arena_freeblockcontents (lua_State *L, ArenaBlock *b) {
++  size_t slot = (sizeof(Table) + sizeof(l_mem) - 1) & ~(sizeof(l_mem) - 1);
++  size_t off;
++  for (off = 0; off + slot <= b->used; off += slot) {
++    GCObject *o = cast(GCObject *, cast_charp(b) + sizeof(ArenaBlock) + off);
++    luaH_freecontents(L, gco2t(o));
++  }
++}
++
++
++void luaC_freearena (lua_State *L, CallInfo *ci) {
++  ArenaBlock *b = ci->u.l.arena;
++  if (b != NULL) {
++    global_State *g = G(L);
++    ArenaBlock *next = b->next;
++    ci->u.l.arena = NULL;
++    arena_freeblockcontents(L, b);
++    if (g->arenafree == NULL || g->arenafree->size < b->size) {
++      if (g->arenafree != NULL)
++        luaM_freemem(L, g->arenafree, sizeof(ArenaBlock) + g->arenafree->size);
++      g->arenafree = b;
++    }
++    else
++      luaM_freemem(L, b, sizeof(ArenaBlock) + b->size);
++    while (next != NULL) {
++      ArenaBlock *nx = next->next;
++      arena_freeblockcontents(L, next);
++      luaM_freemem(L, next, sizeof(ArenaBlock) + next->size);
++      next = nx;
++    }
++  }
++}
++
++/* }====================================================================== */
++
++
+ /*
+ ** create a new collectable object with no offset.
+ */
+@@ -432,14 +556,49 @@ static void cleargraylists (global_State *g) {
+ }
+ 
+ 
++/*
++** Part C.2: an arena table is never linked into any sweep list, so
++** sweep never resets its color back to white the way it does for
++** every ordinary survivor -- and without that reset, a table that's
++** already been traversed once would look permanently "already
++** visited" to every later cycle's mark phase, and stop being
++** re-examined at all. Since every arena object is a Table of the same
++** size, its live objects can be found by walking each still-active
++** Lua frame's arena blocks in fixed strides, with no per-object
++** bookkeeping kept anywhere. (Frames of other coroutines are out of
++** scope here, matching this assignment's own coroutine scope note.)
++*/
++static void arena_resetblock (global_State *g, ArenaBlock *b) {
++  size_t slot = (sizeof(Table) + sizeof(l_mem) - 1) & ~(sizeof(l_mem) - 1);
++  size_t off;
++  for (off = 0; off + slot <= b->used; off += slot) {
++    GCObject *o = cast(GCObject *, cast_charp(b) + sizeof(ArenaBlock) + off);
++    o->marked = cast_byte((o->marked & ~maskgcbits) | luaC_white(g) | G_NEW);
++  }
++}
++
++
++static void arena_resetlive (lua_State *L, global_State *g) {
++  CallInfo *ci;
++  for (ci = L->ci; ci != NULL; ci = ci->previous) {
++    if (!(ci->callstatus & CIST_C)) {
++      ArenaBlock *b;
++      for (b = ci->u.l.arena; b != NULL; b = b->next)
++        arena_resetblock(g, b);
++    }
++  }
++}
++
++
+ /*
+ ** mark root set and reset all gray lists, to start a new collection.
+ ** 'GCmarked' is initialized to count the total number of live bytes
+ ** during a cycle.
+ */
+-static void restartcollection (global_State *g) {
++static void restartcollection (lua_State *L, global_State *g) {
+   cleargraylists(g);
+   g->GCmarked = 0;
++  arena_resetlive(L, g);  /* Part C.2, see above */
+   markobject(g, mainthread(g));
+   markvalue(g, &g->l_registry);
+   markmt(g);
+@@ -1621,7 +1780,7 @@ static l_mem singlestep (lua_State *L, int fast) {
+   g->gcstopem = 1;  /* no emergency collections while collecting */
+   switch (g->gcstate) {
+     case GCSpause: {
+-      restartcollection(g);
++      restartcollection(L, g);
+       g->gcstate = GCSpropagate;
+       stepresult = 1;
+       break;
+@@ -1799,6 +1958,18 @@ void luaC_fullgc (lua_State *L, int isemergency) {
+   g->gcemergency = 0;
+ }
+ 
++
++/*
++** Sets how many objects 'sweepstep' frees per incremental sweep step
++** (the collector's sweep granularity, previously the fixed GCSWEEPMAX
++** constant). Values below 1 are clamped to 1: a step that sweeps
++** nothing would never make progress.
++*/
++LUA_API void lua_setsweepstep (lua_State *L, int n) {
++  (void)L;
++  gcsweepmax = (n < 1) ? 1 : n;
++}
++
+ /* }====================================================== */
+ 
+ 
+diff --git a/assignment_1/lua-5.5.0/src/lgc.h b/assignment_1/lua-5.5.0/src/lgc.h
+index ee05417..f52c773 100644
+--- a/assignment_1/lua-5.5.0/src/lgc.h
++++ b/assignment_1/lua-5.5.0/src/lgc.h
+@@ -259,6 +259,9 @@ LUAI_FUNC void luaC_fullgc (lua_State *L, int isemergency);
+ LUAI_FUNC GCObject *luaC_newobj (lua_State *L, lu_byte tt, size_t sz);
+ LUAI_FUNC GCObject *luaC_newobjdt (lua_State *L, lu_byte tt, size_t sz,
+                                                  size_t offset);
++LUAI_FUNC GCObject *luaC_newarenaobj (lua_State *L, CallInfo *ci, lu_byte tt,
++                                                     size_t sz);
++LUAI_FUNC void luaC_freearena (lua_State *L, CallInfo *ci);
+ LUAI_FUNC void luaC_barrier_ (lua_State *L, GCObject *o, GCObject *v);
+ LUAI_FUNC void luaC_barrierback_ (lua_State *L, GCObject *o);
+ LUAI_FUNC void luaC_checkfinalizer (lua_State *L, GCObject *o, Table *mt);
+diff --git a/assignment_1/lua-5.5.0/src/lstate.c b/assignment_1/lua-5.5.0/src/lstate.c
+index 70a11aa..406d7ae 100644
+--- a/assignment_1/lua-5.5.0/src/lstate.c
++++ b/assignment_1/lua-5.5.0/src/lstate.c
+@@ -263,6 +263,8 @@ static void close_state (lua_State *L) {
+     luaC_freeallobjects(L);  /* collect all objects */
+     luai_userstateclose(L);
+   }
++  if (g->arenafree != NULL)  /* Part C.2: drop the cached spare arena block */
++    luaM_freemem(L, g->arenafree, sizeof(ArenaBlock) + g->arenafree->size);
+   luaM_freearray(L, G(L)->strt.hash, cast_sizet(G(L)->strt.size));
+   freestack(L);
+   lua_assert(gettotalbytes(g) == sizeof(global_State));
+@@ -362,6 +364,7 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
+   g->gcstopem = 0;
+   g->gcemergency = 0;
+   g->finobj = g->tobefnz = g->fixedgc = NULL;
++  g->arenafree = NULL;
+   g->firstold1 = g->survival = g->old1 = g->reallyold = NULL;
+   g->finobjsur = g->finobjold1 = g->finobjrold = NULL;
+   g->sweepgc = NULL;
+diff --git a/assignment_1/lua-5.5.0/src/lstate.h b/assignment_1/lua-5.5.0/src/lstate.h
+index 20dc4d2..478d5a0 100644
+--- a/assignment_1/lua-5.5.0/src/lstate.h
++++ b/assignment_1/lua-5.5.0/src/lstate.h
+@@ -184,6 +184,20 @@ typedef struct stringtable {
+ ** - field 'nres' is used only while closing tbc variables when
+ ** returning from a function;
+ */
++/*
++** A frame-arena block (Part C.2): a plain bump allocator, chained if a
++** frame needs more than one. Objects handed out of it are never linked
++** into any GC list (see 'luaC_newarenaobj' in lgc.c) and are reclaimed
++** in bulk, by simply forgetting the whole chain, when their owning
++** call frame returns ('luaC_freearena', called from 'luaD_poscall').
++*/
++typedef struct ArenaBlock {
++  struct ArenaBlock *next;
++  size_t used;
++  size_t size;
++} ArenaBlock;
++
++
+ struct CallInfo {
+   StkIdRel func;  /* function index in the stack */
+   StkIdRel top;  /* top for this function */
+@@ -193,6 +207,7 @@ struct CallInfo {
+       const Instruction *savedpc;
+       volatile l_signalT trap;  /* function is tracing lines/counts */
+       int nextraargs;  /* # of extra arguments in vararg functions */
++      ArenaBlock *arena;  /* this frame's bump arena, or NULL if unused */
+     } l;
+     struct {  /* only for C functions */
+       lua_KFunction k;  /* continuation in case of yields */
+@@ -352,6 +367,9 @@ typedef struct global_State {
+   GCObject *allweak;  /* list of all-weak tables */
+   GCObject *tobefnz;  /* list of userdata to be GC */
+   GCObject *fixedgc;  /* list of objects not to be collected */
++  ArenaBlock *arenafree;  /* one spare frame-arena block, kept around to
++                             avoid a malloc/free pair on every call that
++                             uses one (Part C.2) */
+   /* fields for generational collector */
+   GCObject *survival;  /* start of objects that survived one GC cycle */
+   GCObject *old1;  /* start of old1 objects */
+diff --git a/assignment_1/lua-5.5.0/src/ltable.c b/assignment_1/lua-5.5.0/src/ltable.c
+index b7f88f6..3581931 100644
+--- a/assignment_1/lua-5.5.0/src/ltable.c
++++ b/assignment_1/lua-5.5.0/src/ltable.c
+@@ -808,6 +808,23 @@ Table *luaH_new (lua_State *L) {
+ }
+ 
+ 
++/*
++** Same as 'luaH_new', for a Table whose GCObject header was already
++** built by the caller (Part C.2: 'o' comes from the frame arena rather
++** than 'luaC_newobj'). Field layout and initial state are identical
++** either way; only where the memory came from differs.
++*/
++Table *luaH_new_at (lua_State *L, GCObject *o) {
++  Table *t = gco2t(o);
++  t->metatable = NULL;
++  t->flags = maskflags;
++  t->array = NULL;
++  t->asize = 0;
++  setnodevector(L, t, 0);
++  return t;
++}
++
++
+ lu_mem luaH_size (Table *t) {
+   lu_mem sz = cast(lu_mem, sizeof(Table)) + concretesize(t->asize);
+   if (!isdummy(t))
+@@ -826,6 +843,18 @@ void luaH_free (lua_State *L, Table *t) {
+ }
+ 
+ 
++/*
++** Same freeing as 'luaH_free', minus the final 'luaM_free' of the
++** Table struct itself (Part C.2: the struct lives in a frame arena,
++** freed with the rest of that arena; its array/hash buffers don't --
++** those are ordinary heap blocks and still need freeing here).
++*/
++void luaH_freecontents (lua_State *L, Table *t) {
++  freehash(L, t);
++  resizearray(L, t, t->asize, 0);
++}
++
++
+ static Node *getfreepos (Table *t) {
+   if (haslastfree(t)) {  /* does it have 'lastfree' information? */
+     /* look for a spot before 'lastfree', updating 'lastfree' */
+diff --git a/assignment_1/lua-5.5.0/src/ltable.h b/assignment_1/lua-5.5.0/src/ltable.h
+index f3b7bc7..db8129c 100644
+--- a/assignment_1/lua-5.5.0/src/ltable.h
++++ b/assignment_1/lua-5.5.0/src/ltable.h
+@@ -167,11 +167,13 @@ LUAI_FUNC void luaH_set (lua_State *L, Table *t, const TValue *key,
+ LUAI_FUNC void luaH_finishset (lua_State *L, Table *t, const TValue *key,
+                                               TValue *value, int hres);
+ LUAI_FUNC Table *luaH_new (lua_State *L);
++LUAI_FUNC Table *luaH_new_at (lua_State *L, GCObject *o);
+ LUAI_FUNC void luaH_resize (lua_State *L, Table *t, unsigned nasize,
+                                                     unsigned nhsize);
+ LUAI_FUNC void luaH_resizearray (lua_State *L, Table *t, unsigned nasize);
+ LUAI_FUNC lu_mem luaH_size (Table *t);
+ LUAI_FUNC void luaH_free (lua_State *L, Table *t);
++LUAI_FUNC void luaH_freecontents (lua_State *L, Table *t);
+ LUAI_FUNC int luaH_next (lua_State *L, Table *t, StkId key);
+ LUAI_FUNC lua_Unsigned luaH_getn (lua_State *L, Table *t);
+ 
+diff --git a/assignment_1/lua-5.5.0/src/lvm.c b/assignment_1/lua-5.5.0/src/lvm.c
+index c70e2b8..48251fa 100644
+--- a/assignment_1/lua-5.5.0/src/lvm.c
++++ b/assignment_1/lua-5.5.0/src/lvm.c
+@@ -1409,6 +1409,9 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
+         unsigned b = cast_uint(GETARG_vB(i));  /* log2(hash size) + 1 */
+         unsigned c = cast_uint(GETARG_vC(i));  /* array size */
+         Table *t;
++        /* this instruction's own pc, for the arenapc lookup below:
++           'pc' already points past it (vmfetch already ran) */
++        int ntpc = cast_int(pc - cl->p->code - 1);
+         if (b > 0)
+           b = 1u << (b - 1);  /* hash size is 2^(b - 1) */
+         if (TESTARG_k(i)) {  /* non-zero extra argument? */
+@@ -1418,7 +1421,24 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
+         }
+         pc++;  /* skip extra argument */
+         L->top.p = ra + 1;  /* correct top in case of emergency GC */
+-        t = luaH_new(L);  /* memory allocation */
++        /* Part C.2: the escape analyzer (lparser.c) proved this exact
++           site's table never leaves this call frame, so it can bypass
++           the GC heap; every other NEWTABLE keeps allocating exactly
++           as before. No per-access cost: this is the one check, made
++           once, at creation. Restricted to full/incremental collection
++           ('restartcollection' is what keeps a live arena table's color
++           from going stale between cycles); generational minor cycles
++           don't do a fresh root scan at all, relying instead on already
++           having every reachable object properly represented in its
++           young/old bookkeeping, which an arena object structurally
++           isn't, so every candidate safely bails to the heap there. */
++        if (cl->p->arenapc != NULL && cl->p->arenapc[ntpc] &&
++            G(L)->gckind == KGC_INC) {
++          GCObject *o = luaC_newarenaobj(L, ci, LUA_VTABLE, sizeof(Table));
++          t = luaH_new_at(L, o);
++        }
++        else
++          t = luaH_new(L);  /* memory allocation */
+         sethvalue2s(L, ra, t);
+         if (b != 0 || c != 0)
+           luaH_resize(L, t, c, b);  /* idem */
+@@ -1792,6 +1812,8 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
+         }
+         else {  /* do the 'poscall' here */
+           int nres = get_nresults(ci->callstatus);
++          if (ci->u.l.arena != NULL)  /* Part C.2: this frame skips luaD_poscall */
++            luaC_freearena(L, ci);
+           L->ci = ci->previous;  /* back to caller */
+           L->top.p = base - 1;
+           for (; l_unlikely(nres > 0); nres--)
+@@ -1809,6 +1831,8 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
+         }
+         else {  /* do the 'poscall' here */
+           int nres = get_nresults(ci->callstatus);
++          if (ci->u.l.arena != NULL)  /* Part C.2: this frame skips luaD_poscall */
++            luaC_freearena(L, ci);
+           L->ci = ci->previous;  /* back to caller */
+           if (nres == 0)
+             L->top.p = base - 1;  /* asked for no results */

@@ -1,0 +1,39 @@
+[02:00:35] D.1a: callgrind sweep across param sets (current build)
+[02:00:45]   d1 fullgc default done
+[02:00:55]   d1 incrementalgc default done
+[02:01:04]   d1 generationalgc default done
+[02:01:04]   d1 fullgc m100_n100 done
+[02:01:04]   d1 incrementalgc m100_n100 done
+[02:01:05]   d1 generationalgc m100_n100 done
+[02:01:05]   d1 fullgc m500_n100 done
+[02:01:06]   d1 incrementalgc m500_n100 done
+[02:01:07]   d1 generationalgc m500_n100 done
+[02:01:12]   d1 fullgc m5000_n100 done
+[02:01:17]   d1 incrementalgc m5000_n100 done
+[02:01:21]   d1 generationalgc m5000_n100 done
+[02:01:21] D.1c: perf stat sweep (default params)
+[02:01:22]   perf fullgc done
+[02:01:22]   perf incrementalgc done
+[02:01:22]   perf generationalgc done
+[02:01:22]   perf nogc done
+[02:01:22] D.2: sweep-step sweep
+[02:04:52] D.2: sweep-step sweep
+[02:05:01]   d2 step=5 done
+[02:05:11]   d2 step=20 done
+[02:05:20]   d2 step=50 done
+[02:05:30]   d2 step=200 done
+[02:05:30] D.3a: parse-only cost, stock vs current
+[02:05:30]   d3a stock done
+[02:05:31]   d3a current done
+[02:05:31] D.3b: stock vs current, callgrind, testbench + promobench
+[02:05:40]   d3b default stock done
+[02:05:49]   d3b default current done
+[02:05:50]   d3b m100_n100 stock done
+[02:05:50]   d3b m100_n100 current done
+[02:05:51]   d3b m500_n100 stock done
+[02:05:52]   d3b m500_n100 current done
+[02:05:56]   d3b m5000_n100 stock done
+[02:06:01]   d3b m5000_n100 current done
+[02:06:10]   d3b promobench stock done
+[02:07:21]   d3b promobench current done
+[02:07:21] ALL DONE

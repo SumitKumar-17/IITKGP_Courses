@@ -808,6 +808,23 @@ Table *luaH_new (lua_State *L) {
 }
 
 
+/*
+** Same as 'luaH_new', for a Table whose GCObject header was already
+** built by the caller (Part C.2: 'o' comes from the frame arena rather
+** than 'luaC_newobj'). Field layout and initial state are identical
+** either way; only where the memory came from differs.
+*/
+Table *luaH_new_at (lua_State *L, GCObject *o) {
+  Table *t = gco2t(o);
+  t->metatable = NULL;
+  t->flags = maskflags;
+  t->array = NULL;
+  t->asize = 0;
+  setnodevector(L, t, 0);
+  return t;
+}
+
+
 lu_mem luaH_size (Table *t) {
   lu_mem sz = cast(lu_mem, sizeof(Table)) + concretesize(t->asize);
   if (!isdummy(t))
@@ -823,6 +840,18 @@ void luaH_free (lua_State *L, Table *t) {
   freehash(L, t);
   resizearray(L, t, t->asize, 0);
   luaM_free(L, t);
+}
+
+
+/*
+** Same freeing as 'luaH_free', minus the final 'luaM_free' of the
+** Table struct itself (Part C.2: the struct lives in a frame arena,
+** freed with the rest of that arena; its array/hash buffers don't --
+** those are ordinary heap blocks and still need freeing here).
+*/
+void luaH_freecontents (lua_State *L, Table *t) {
+  freehash(L, t);
+  resizearray(L, t, t->asize, 0);
 }
 
 

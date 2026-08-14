@@ -263,6 +263,7 @@ Proto *luaF_newproto (lua_State *L) {
   f->linedefined = 0;
   f->lastlinedefined = 0;
   f->source = NULL;
+  f->arenapc = NULL;
   return f;
 }
 
@@ -292,6 +293,8 @@ void luaF_freeproto (lua_State *L, Proto *f) {
   luaM_freearray(L, f->k, cast_sizet(f->sizek));
   luaM_freearray(L, f->locvars, cast_sizet(f->sizelocvars));
   luaM_freearray(L, f->upvalues, cast_sizet(f->sizeupvalues));
+  if (f->arenapc)
+    luaM_freearray(L, f->arenapc, cast_sizet(f->sizecode));
   luaM_free(L, f);
 }
 

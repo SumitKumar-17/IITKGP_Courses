@@ -162,6 +162,39 @@ typedef struct Dyndata {
 struct BlockCnt;  /* defined in lparser.c */
 
 
+/* maximum number of local variables per function (must fit in a short) */
+#define MAXVARS		200
+
+/* maximum table-constructor sites tracked as escape-analysis candidates
+   in one function; bounded by MAXVARS since a candidate is always some
+   function's local variable */
+#define MAXTCAND	MAXVARS
+
+/* maximum table constructors still unbound to a local within the
+   statement currently being parsed (e.g. 'local a, b = {}, {}') */
+#define MAXCTORPEND	16
+
+
+/* a local table constructor not yet proven to escape its frame */
+typedef struct TCand {
+  short vidx;       /* index of the local it got bound to, in actvar.arr */
+  int pc;           /* pc of the OP_NEWTABLE that created it */
+  lu_byte escapes;  /* set once any of the four escape rules fires */
+} TCand;
+
+/* "if 'from' escapes, 'to' must escape too", recorded when a candidate
+   is stored into another one and resolved once the function is done */
+typedef struct TCEdge {
+  short from, to;
+} TCEdge;
+
+/* a table constructor seen but not yet bound to a local (or discarded) */
+typedef struct CtorPend {
+  lu_byte reg;
+  int pc;
+} CtorPend;
+
+
 /* state needed to generate code for a given function */
 typedef struct FuncState {
   Proto *f;  /* current function header */
@@ -183,6 +216,18 @@ typedef struct FuncState {
   lu_byte freereg;  /* first free register */
   lu_byte iwthabs;  /* instructions issued since last absolute line info */
   lu_byte needclose;  /* function needs to close upvalues when returning */
+  /* --- static escape analysis for stack promotion (Part C.1) --- */
+  TString *lastname;  /* name most recently resolved by 'singlevar' */
+  lu_byte lastwasglobal;  /* true if that name resolved to a global,
+                             i.e. wasn't shadowed by a local or upvalue */
+  lu_byte escapectx;  /* >0: a bare local seen right now should escape */
+  lu_byte inforctl;  /* parsing the 'in explist' of a generic for loop */
+  lu_byte nctorpend;  /* table constructors not yet bound to a local */
+  CtorPend ctorpend[MAXCTORPEND];
+  int ntcand;  /* active table-local candidates in this function */
+  TCand tcand[MAXTCAND];
+  int ntcedge;  /* pending "from escapes if to escapes" dependencies */
+  TCEdge tcedge[MAXTCAND];
 } FuncState;
 
 
