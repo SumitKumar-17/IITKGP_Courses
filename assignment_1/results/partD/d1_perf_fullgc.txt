@@ -1,0 +1,21 @@
+# started on Sat Aug 15 02:06:16 2026
+
+
+ Performance counter stats for 'taskset -c 2 ./fullgc testbench.lua':
+
+     <not counted>      cpu_atom/branch-misses/                                                 (0.00%)
+          3,90,721      cpu_core/branch-misses/                                               
+             1,060      page-faults                                                           
+     <not counted>      cpu_atom/cache-misses/                                                  (0.00%)
+          1,23,495      cpu_core/cache-misses/                                                
+     <not counted>      cpu_atom/instructions/                                                  (0.00%)
+    3,81,53,87,653      cpu_core/instructions/           #    3.64  insn per cycle            
+     <not counted>      cpu_atom/cycles/                                                        (0.00%)
+    1,04,69,59,468      cpu_core/cycles/                                                      
+
+       0.187257075 seconds time elapsed
+
+       0.189999000 seconds user
+       0.000999000 seconds sys
+
+

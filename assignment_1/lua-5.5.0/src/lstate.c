@@ -263,6 +263,8 @@ static void close_state (lua_State *L) {
     luaC_freeallobjects(L);  /* collect all objects */
     luai_userstateclose(L);
   }
+  if (g->arenafree != NULL)  /* Part C.2: drop the cached spare arena block */
+    luaM_freemem(L, g->arenafree, sizeof(ArenaBlock) + g->arenafree->size);
   luaM_freearray(L, G(L)->strt.hash, cast_sizet(G(L)->strt.size));
   freestack(L);
   lua_assert(gettotalbytes(g) == sizeof(global_State));
@@ -362,6 +364,7 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
   g->gcstopem = 0;
   g->gcemergency = 0;
   g->finobj = g->tobefnz = g->fixedgc = NULL;
+  g->arenafree = NULL;
   g->firstold1 = g->survival = g->old1 = g->reallyold = NULL;
   g->finobjsur = g->finobjold1 = g->finobjrold = NULL;
   g->sweepgc = NULL;

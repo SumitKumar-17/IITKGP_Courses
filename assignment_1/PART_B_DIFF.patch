@@ -1,0 +1,51 @@
+diff --git a/assignment_1/lua-5.5.0/src/lgc.c b/assignment_1/lua-5.5.0/src/lgc.c
+index c64d74b..9da471c 100644
+--- a/assignment_1/lua-5.5.0/src/lgc.c
++++ b/assignment_1/lua-5.5.0/src/lgc.c
+@@ -30,8 +30,14 @@
+ ** Maximum number of elements to sweep in each single step.
+ ** (Large enough to dissipate fixed overheads but small enough
+ ** to allow small steps for the collector.)
++** Tunable at runtime through lua_setsweepstep; keeps the original
++** value as its default so behaviour is unchanged until someone calls it.
+ */
+-#define GCSWEEPMAX	20
++#define GCSWEEPMAX_DEFAULT	20
++
++static int gcsweepmax = GCSWEEPMAX_DEFAULT;
++
++#define GCSWEEPMAX	gcsweepmax
+ 
+ 
+ /*
+@@ -1799,6 +1805,18 @@ void luaC_fullgc (lua_State *L, int isemergency) {
+   g->gcemergency = 0;
+ }
+ 
++
++/*
++** Sets how many objects 'sweepstep' frees per incremental sweep step
++** (the collector's sweep granularity, previously the fixed GCSWEEPMAX
++** constant). Values below 1 are clamped to 1: a step that sweeps
++** nothing would never make progress.
++*/
++LUA_API void lua_setsweepstep (lua_State *L, int n) {
++  (void)L;
++  gcsweepmax = (n < 1) ? 1 : n;
++}
++
+ /* }====================================================== */
+ 
+ 
+diff --git a/assignment_1/lua-5.5.0/src/lua.h b/assignment_1/lua-5.5.0/src/lua.h
+index ab473dc..4b4155d 100644
+--- a/assignment_1/lua-5.5.0/src/lua.h
++++ b/assignment_1/lua-5.5.0/src/lua.h
+@@ -358,6 +358,7 @@ LUA_API void (lua_warning)  (lua_State *L, const char *msg, int tocont);
+ 
+ 
+ LUA_API int (lua_gc) (lua_State *L, int what, ...);
++LUA_API void (lua_setsweepstep) (lua_State *L, int n);
+ 
+ 
+ /*

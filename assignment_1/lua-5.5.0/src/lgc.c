@@ -30,8 +30,14 @@
 ** Maximum number of elements to sweep in each single step.
 ** (Large enough to dissipate fixed overheads but small enough
 ** to allow small steps for the collector.)
+** Tunable at runtime through lua_setsweepstep; keeps the original
+** value as its default so behaviour is unchanged until someone calls it.
 */
-#define GCSWEEPMAX	20
+#define GCSWEEPMAX_DEFAULT	20
+
+static int gcsweepmax = GCSWEEPMAX_DEFAULT;
+
+#define GCSWEEPMAX	gcsweepmax
 
 
 /*
@@ -307,6 +313,124 @@ GCObject *luaC_newobjdt (lua_State *L, lu_byte tt, size_t sz, size_t offset) {
 
 
 /*
+** {======================================================================
+** Frame-arena allocation (Part C.2).
+**
+** An arena object is a completely ordinary GCObject -- same header,
+** same white/black bookkeeping -- except its 'next' link is left NULL,
+** so it is never part of 'allgc' (or any other sweep list) and
+** 'sweepgc'/'sweeplist' never sees it, let alone frees it. It is still
+** found and traversed by the mark phase like anything else reachable
+** from the stack, which is what keeps whatever it points to (a string
+** value, a nested table, ...) correctly alive; it is simply never
+** *swept*. Its memory is reclaimed in one shot, by 'luaC_freearena',
+** when the call frame that owns it returns.
+*/
+
+#define ARENABLOCKSIZE	((size_t)4096)
+
+static ArenaBlock *arena_newblock (lua_State *L, size_t need) {
+  global_State *g = G(L);
+  size_t bsize = (need > ARENABLOCKSIZE) ? need : ARENABLOCKSIZE;
+  ArenaBlock *b;
+  if (g->arenafree != NULL && g->arenafree->size >= bsize) {
+    b = g->arenafree;
+    g->arenafree = NULL;
+  }
+  else {
+    b = cast(ArenaBlock *, luaM_malloc_(L, sizeof(ArenaBlock) + bsize, 0));
+    b->size = bsize;
+  }
+  b->used = 0;
+  return b;
+}
+
+
+static void *arena_alloc (lua_State *L, CallInfo *ci, size_t sz) {
+  ArenaBlock *b = ci->u.l.arena;
+  sz = (sz + sizeof(l_mem) - 1) & ~(sizeof(l_mem) - 1);  /* align up */
+  if (b == NULL || b->used + sz > b->size) {
+    ArenaBlock *nb = arena_newblock(L, sz);
+    nb->next = b;  /* chain behind whatever this frame already had */
+    ci->u.l.arena = b = nb;
+  }
+  {
+    char *p = cast_charp(b) + sizeof(ArenaBlock) + b->used;
+    b->used += sz;
+    return p;
+  }
+}
+
+
+/*
+** Bump-allocate a GCObject out of the current Lua frame's arena instead
+** of the regular heap. Correctness depends only on two things: the
+** object is a legitimate white GCObject when created (so mark-phase
+** stack scanning treats it exactly like any other reachable value),
+** and 'o->next' is NULL (so sweep code, which only ever walks list
+** links, can never reach it).
+*/
+GCObject *luaC_newarenaobj (lua_State *L, CallInfo *ci, lu_byte tt, size_t sz) {
+  global_State *g = G(L);
+  GCObject *o = cast(GCObject *, arena_alloc(L, ci, sz));
+  o->marked = luaC_white(g);
+  o->tt = tt;
+  o->next = NULL;
+  return o;
+}
+
+
+/*
+** Release a frame's arena in bulk when it returns. The most recently
+** used block is kept as a spare (one per Lua state) to save the next
+** frame that needs one a malloc/free round trip; everything else is
+** freed outright.
+*/
+/*
+** A Table's own struct lives in the arena, but its array/hash parts
+** are ordinary heap blocks it merely points to (grown via the exact
+** same 'luaH_resize'/'luaH_newkey' every table uses) -- freeing (or
+** recycling) the block that holds the struct doesn't touch those, so
+** they have to be let go explicitly here, one table at a time, before
+** the block itself is dropped or handed back for reuse.
+*/
+static void arena_freeblockcontents (lua_State *L, ArenaBlock *b) {
+  size_t slot = (sizeof(Table) + sizeof(l_mem) - 1) & ~(sizeof(l_mem) - 1);
+  size_t off;
+  for (off = 0; off + slot <= b->used; off += slot) {
+    GCObject *o = cast(GCObject *, cast_charp(b) + sizeof(ArenaBlock) + off);
+    luaH_freecontents(L, gco2t(o));
+  }
+}
+
+
+void luaC_freearena (lua_State *L, CallInfo *ci) {
+  ArenaBlock *b = ci->u.l.arena;
+  if (b != NULL) {
+    global_State *g = G(L);
+    ArenaBlock *next = b->next;
+    ci->u.l.arena = NULL;
+    arena_freeblockcontents(L, b);
+    if (g->arenafree == NULL || g->arenafree->size < b->size) {
+      if (g->arenafree != NULL)
+        luaM_freemem(L, g->arenafree, sizeof(ArenaBlock) + g->arenafree->size);
+      g->arenafree = b;
+    }
+    else
+      luaM_freemem(L, b, sizeof(ArenaBlock) + b->size);
+    while (next != NULL) {
+      ArenaBlock *nx = next->next;
+      arena_freeblockcontents(L, next);
+      luaM_freemem(L, next, sizeof(ArenaBlock) + next->size);
+      next = nx;
+    }
+  }
+}
+
+/* }====================================================================== */
+
+
+/*
 ** create a new collectable object with no offset.
 */
 GCObject *luaC_newobj (lua_State *L, lu_byte tt, size_t sz) {
@@ -433,13 +557,48 @@ static void cleargraylists (global_State *g) {
 
 
 /*
+** Part C.2: an arena table is never linked into any sweep list, so
+** sweep never resets its color back to white the way it does for
+** every ordinary survivor -- and without that reset, a table that's
+** already been traversed once would look permanently "already
+** visited" to every later cycle's mark phase, and stop being
+** re-examined at all. Since every arena object is a Table of the same
+** size, its live objects can be found by walking each still-active
+** Lua frame's arena blocks in fixed strides, with no per-object
+** bookkeeping kept anywhere. (Frames of other coroutines are out of
+** scope here, matching this assignment's own coroutine scope note.)
+*/
+static void arena_resetblock (global_State *g, ArenaBlock *b) {
+  size_t slot = (sizeof(Table) + sizeof(l_mem) - 1) & ~(sizeof(l_mem) - 1);
+  size_t off;
+  for (off = 0; off + slot <= b->used; off += slot) {
+    GCObject *o = cast(GCObject *, cast_charp(b) + sizeof(ArenaBlock) + off);
+    o->marked = cast_byte((o->marked & ~maskgcbits) | luaC_white(g) | G_NEW);
+  }
+}
+
+
+static void arena_resetlive (lua_State *L, global_State *g) {
+  CallInfo *ci;
+  for (ci = L->ci; ci != NULL; ci = ci->previous) {
+    if (!(ci->callstatus & CIST_C)) {
+      ArenaBlock *b;
+      for (b = ci->u.l.arena; b != NULL; b = b->next)
+        arena_resetblock(g, b);
+    }
+  }
+}
+
+
+/*
 ** mark root set and reset all gray lists, to start a new collection.
 ** 'GCmarked' is initialized to count the total number of live bytes
 ** during a cycle.
 */
-static void restartcollection (global_State *g) {
+static void restartcollection (lua_State *L, global_State *g) {
   cleargraylists(g);
   g->GCmarked = 0;
+  arena_resetlive(L, g);  /* Part C.2, see above */
   markobject(g, mainthread(g));
   markvalue(g, &g->l_registry);
   markmt(g);
@@ -1621,7 +1780,7 @@ static l_mem singlestep (lua_State *L, int fast) {
   g->gcstopem = 1;  /* no emergency collections while collecting */
   switch (g->gcstate) {
     case GCSpause: {
-      restartcollection(g);
+      restartcollection(L, g);
       g->gcstate = GCSpropagate;
       stepresult = 1;
       break;
@@ -1797,6 +1956,18 @@ void luaC_fullgc (lua_State *L, int isemergency) {
       break;
   }
   g->gcemergency = 0;
+}
+
+
+/*
+** Sets how many objects 'sweepstep' frees per incremental sweep step
+** (the collector's sweep granularity, previously the fixed GCSWEEPMAX
+** constant). Values below 1 are clamped to 1: a step that sweeps
+** nothing would never make progress.
+*/
+LUA_API void lua_setsweepstep (lua_State *L, int n) {
+  (void)L;
+  gcsweepmax = (n < 1) ? 1 : n;
 }
 
 /* }====================================================== */

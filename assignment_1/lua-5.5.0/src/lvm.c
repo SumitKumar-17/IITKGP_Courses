@@ -1409,6 +1409,9 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
         unsigned b = cast_uint(GETARG_vB(i));  /* log2(hash size) + 1 */
         unsigned c = cast_uint(GETARG_vC(i));  /* array size */
         Table *t;
+        /* this instruction's own pc, for the arenapc lookup below:
+           'pc' already points past it (vmfetch already ran) */
+        int ntpc = cast_int(pc - cl->p->code - 1);
         if (b > 0)
           b = 1u << (b - 1);  /* hash size is 2^(b - 1) */
         if (TESTARG_k(i)) {  /* non-zero extra argument? */
@@ -1418,7 +1421,24 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
         }
         pc++;  /* skip extra argument */
         L->top.p = ra + 1;  /* correct top in case of emergency GC */
-        t = luaH_new(L);  /* memory allocation */
+        /* Part C.2: the escape analyzer (lparser.c) proved this exact
+           site's table never leaves this call frame, so it can bypass
+           the GC heap; every other NEWTABLE keeps allocating exactly
+           as before. No per-access cost: this is the one check, made
+           once, at creation. Restricted to full/incremental collection
+           ('restartcollection' is what keeps a live arena table's color
+           from going stale between cycles); generational minor cycles
+           don't do a fresh root scan at all, relying instead on already
+           having every reachable object properly represented in its
+           young/old bookkeeping, which an arena object structurally
+           isn't, so every candidate safely bails to the heap there. */
+        if (cl->p->arenapc != NULL && cl->p->arenapc[ntpc] &&
+            G(L)->gckind == KGC_INC) {
+          GCObject *o = luaC_newarenaobj(L, ci, LUA_VTABLE, sizeof(Table));
+          t = luaH_new_at(L, o);
+        }
+        else
+          t = luaH_new(L);  /* memory allocation */
         sethvalue2s(L, ra, t);
         if (b != 0 || c != 0)
           luaH_resize(L, t, c, b);  /* idem */
@@ -1792,6 +1812,8 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
         }
         else {  /* do the 'poscall' here */
           int nres = get_nresults(ci->callstatus);
+          if (ci->u.l.arena != NULL)  /* Part C.2: this frame skips luaD_poscall */
+            luaC_freearena(L, ci);
           L->ci = ci->previous;  /* back to caller */
           L->top.p = base - 1;
           for (; l_unlikely(nres > 0); nres--)
@@ -1809,6 +1831,8 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
         }
         else {  /* do the 'poscall' here */
           int nres = get_nresults(ci->callstatus);
+          if (ci->u.l.arena != NULL)  /* Part C.2: this frame skips luaD_poscall */
+            luaC_freearena(L, ci);
           L->ci = ci->previous;  /* back to caller */
           if (nres == 0)
             L->top.p = base - 1;  /* asked for no results */

@@ -611,6 +611,8 @@ void luaD_poscall (lua_State *L, CallInfo *ci, int nres) {
   /* function cannot be in any of these cases when returning */
   lua_assert(!(ci->callstatus &
         (CIST_HOOKED | CIST_YPCALL | CIST_FIN | CIST_CLSRET)));
+  if (!(ci->callstatus & CIST_C) && ci->u.l.arena != NULL)
+    luaC_freearena(L, ci);  /* Part C.2: drop this frame's arena tables */
   L->ci = ci->previous;  /* back to caller (after closing variables) */
 }
 
@@ -689,7 +691,15 @@ int luaD_pretailcall (lua_State *L, CallInfo *ci, StkId func,
         setnilvalue(s2v(func + narg1));  /* complete missing arguments */
       ci->top.p = func + 1 + fsize;  /* top for new function */
       lua_assert(ci->top.p <= L->stack_last.p);
+      if (ci->u.l.arena != NULL)  /* Part C.2: the tail call ends this
+                                     frame; 'ci' is about to be reused
+                                     for the new one, so its arena has
+                                     to go now, not at some later
+                                     'luaD_poscall' that will never see
+                                     this frame again */
+        luaC_freearena(L, ci);
       ci->u.l.savedpc = p->code;  /* starting point */
+      ci->u.l.arena = NULL;
       ci->callstatus |= CIST_TAIL;
       L->top.p = func + narg1;  /* set top */
       return -1;
@@ -732,6 +742,7 @@ CallInfo *luaD_precall (lua_State *L, StkId func, int nresults) {
       checkstackp(L, fsize, func);
       L->ci = ci = prepCallInfo(L, func, status, func + 1 + fsize);
       ci->u.l.savedpc = p->code;  /* starting point */
+      ci->u.l.arena = NULL;  /* Part C.2: no frame arena until first use */
       for (; narg < nfixparams; narg++)
         setnilvalue(s2v(L->top.p++));  /* complete missing arguments */
       lua_assert(ci->top.p <= L->stack_last.p);
@@ -1035,6 +1046,22 @@ LUA_API int lua_yieldk (lua_State *L, int nresults, lua_KContext ctx,
 
 
 /*
+** Part C.2: an error longjmps straight past 'luaD_poscall' for every
+** frame between where it happened and the protected boundary that
+** catches it, so their arenas (if any) would otherwise never be freed.
+** Walk exactly those frames -- from the current 'L->ci' up to (but not
+** including) 'stop', the ci being restored to -- before it's dropped.
+*/
+static void freearenas (lua_State *L, CallInfo *stop) {
+  CallInfo *ci;
+  for (ci = L->ci; ci != stop; ci = ci->previous) {
+    if (!(ci->callstatus & CIST_C) && ci->u.l.arena != NULL)
+      luaC_freearena(L, ci);
+  }
+}
+
+
+/*
 ** Auxiliary structure to call 'luaF_close' in protected mode.
 */
 struct CloseP {
@@ -1066,6 +1093,7 @@ TStatus luaD_closeprotected (lua_State *L, ptrdiff_t level, TStatus status) {
     if (l_likely(status == LUA_OK))  /* no more errors? */
       return pcl.status;
     else {  /* an error occurred; restore saved state and repeat */
+      freearenas(L, old_ci);  /* Part C.2: these frames skip luaD_poscall */
       L->ci = old_ci;
       L->allowhook = old_allowhooks;
     }
@@ -1087,6 +1115,7 @@ TStatus luaD_pcall (lua_State *L, Pfunc func, void *u, ptrdiff_t old_top,
   L->errfunc = ef;
   status = luaD_rawrunprotected(L, func, u);
   if (l_unlikely(status != LUA_OK)) {  /* an error occurred? */
+    freearenas(L, old_ci);  /* Part C.2: these frames skip luaD_poscall */
     L->ci = old_ci;
     L->allowhook = old_allowhooks;
     status = luaD_closeprotected(L, old_top, status);
