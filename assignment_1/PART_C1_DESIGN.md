@@ -1,4 +1,4 @@
-# Part C.1 — Static Escape Analysis, Design Note
+# Part C.1: Static Escape Analysis, Design Note
 
 ## What counts as a candidate
 
@@ -23,13 +23,13 @@ that expression's register matches the constructor pending from this
 same statement, the pending entry becomes a real candidate. Anything
 else (`local a, b = {}, {}`, `local t = f()`, `local t = {} + 0`, and
 of course `local t` with no initializer) simply never becomes a
-candidate and keeps allocating on the heap exactly as it does today —
-correct by construction, since we never claimed to handle it.
+candidate and keeps allocating on the heap exactly as it does today,
+which is correct by construction, since we never claimed to handle it.
 
 ## The four rules
 
 **1. Return-escape.** `retstat` and `explist` both call `checkescape` on
-every value in a return list, not just the last one — `explist` checks
+every value in a return list, not just the last one: `explist` checks
 each item right before discharging it into the next register, and
 `retstat` checks the trailing item itself once `explist` returns.
 Both are gated by `fs->escapectx`, a flag `retstat` sets for the
@@ -48,14 +48,14 @@ the single-target fast path of `restassign` (`t[k] = v` /
 
 - if `src` isn't a bare candidate reference, nothing to do;
 - if `dst` isn't an indexed target (i.e. this is `x = t`, a plain
-  variable getting the candidate's value), `src` escapes outright —
+  variable getting the candidate's value), `src` escapes outright;
   this is treated as aliasing, not tracked further;
 - if `dst` is indexed and its container is *not* itself a tracked,
   currently-non-escaping candidate, `src` escapes (this is the
   "globals are always escaping" case, and also covers upvalues and any
   other local that isn't itself a `local t = {...}` candidate);
 - if the container *is* another still-non-escaping candidate, `src`
-  doesn't escape outright — a dependency edge is recorded instead
+  doesn't escape outright. A dependency edge is recorded instead
   (`src escapes if container escapes`), since the container's own fate
   might not be known yet.
 
@@ -64,7 +64,7 @@ once the whole function body has been parsed: repeatedly walk the
 edges and propagate `escapes = 1` across them until nothing changes.
 This is exactly the "worklist... typically converging in 1-2 passes"
 the spec describes, just phrased as a dependency graph instead of a
-literal worklist — for a handful of candidates per function it
+literal worklist. For a handful of candidates per function it
 converges immediately.
 
 Two things this does *not* attempt, on purpose: a candidate stored
@@ -80,7 +80,7 @@ to the existing heap path, so both are safe, just not optimized.
 
 **4. Call-escape.** `suffixedexp` tracks, locally, whether the value it's
 about to call is still exactly the bare name `primaryexp` just produced
-(`barename`) — any `.`/`[`/`:` suffix clears it, so `f.x(t)` or
+(`barename`); any `.`/`[`/`:` suffix clears it, so `f.x(t)` or
 `t:m()` are never whitelisted no matter what `f`/`m` are. A bare,
 unshadowed global name (a plain `name(...)` where `name` isn't a local
 or upvalue) gets checked against a two-tier whitelist:
@@ -90,7 +90,7 @@ or upvalue) gets checked against a two-tier whitelist:
 - `pairs`/`ipairs` are only safe as the control expression of a generic
   `for` loop (`fs->inforctl`, set by `forlist` around its own
   `explist` call), because unlike `type`/`print` they literally return
-  the table as part of their result (`next, t, nil`) — safe *only*
+  the table as part of their result (`next, t, nil`). It's safe *only*
   because that result never leaves the current frame, which is exactly
   what for-loop control state is. `pairs(t)` used any other way (e.g.
   `return pairs(t)`, `local it = pairs(t)`) is guilt-by-default like any
@@ -118,7 +118,7 @@ whenever a candidate's real variable index didn't coincide numerically
 with its position in the candidate list.
 
 The spec's own scope note says a table crossing a `coroutine.yield`
-boundary only needs to be treated as an automatic escape, nothing more —
+boundary only needs to be treated as an automatic escape, nothing more.
 `corotest.lua` confirms that falls out of rule 4 for free: `t[1] = 42;
 coroutine.yield(t)` marks `t` escaping with no coroutine-specific code
 anywhere, since `coroutine.yield` is just an ordinary call that was
@@ -133,7 +133,7 @@ anything about `obj` on its own, but because
 `survivors` escapes (rule 3). That store only happens on 1 in every
 `survive_every` iterations at runtime, but the analysis works at the
 source level, not per execution, so it doesn't get to assume the
-uncommon branch won't run — which is exactly the spec's own "fail
+uncommon branch won't run, which is exactly the spec's own "fail
 toward the GC, never away from correctness" requirement. The consequence
 for Part D is that the main testbench loop has nothing to promote,
 which is a real, useful result on its own, discussed there together with

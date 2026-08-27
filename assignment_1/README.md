@@ -1,4 +1,4 @@
-# Part B — Sweep Granularity, Making It Tunable
+# Part B: Sweep Granularity, Making It Tunable
 
 ## What changed
 
