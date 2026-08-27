@@ -1,4 +1,4 @@
-# Part A — Understanding Lua's GC
+# Part A: Understanding Lua's GC
 
 Sumit Kumar (22CS30056), Jatin Mahawar (22CS30032)
 
@@ -40,7 +40,7 @@ Wherever this report says "GC-attributable instructions," it means Ir
 itself: `singlestep`, `luaC_step`, `atomic`, `entersweep`, `sweeplist`,
 `sweep2old`, `propagatemark`, `traversearray`, `genlink`, `freeobj`,
 `luaC_fullgc`, and so on. `luaC_newobj`/`luaH_new` are left out on
-purpose — they measured identically across all three runs (42,005,439 /
+purpose: they measured identically across all three runs (42,005,439 /
 28,000,308 Ir), which makes sense since creating a table costs the same
 regardless of who eventually reclaims it. What actually differs between
 the three configurations is the reclamation side, not the allocation
@@ -57,7 +57,7 @@ all three and is worth pointing out up front: `freeobj` is called
 2,000,022 times, every time. `testbench.lua` allocates 2,000,000 tables;
 the remaining ~22 are strings/closures/upvalues that back `test` itself.
 Everything ever allocated gets freed at `lua_close`, no matter which
-collector is running — the "10,000 survive" line in the testbench only
+collector is running. The "10,000 survive" line in the testbench only
 means those tables outlive intermediate cycles, not that they're
 immortal. So the three configurations don't disagree on how much garbage
 there is to collect, only on when it gets collected and by which internal
@@ -67,19 +67,19 @@ path, which is what the rest of this section is about.
 
 `luaC_fullgc` fires 111 times over the run (once per 100,000-instruction
 hook tick). Each call drives the whole state machine to completion in
-one go through `luaC_runtilstate` — mark, `atomic`, `entersweep`, sweep —
+one go through `luaC_runtilstate` (mark, `atomic`, `entersweep`, sweep)
 before returning control. `singlestep` is called 339 times across those
 111 cycles, about 3 per cycle, which lines up with walking
 `GCSpropagate -> GCSenteratomic -> GCSswpallgc -> GCSswpend`. `atomic`
 and `entersweep` are each called 113 times (roughly one per cycle, plus
-a couple at the boundaries), and `propagatemark` 1,108,692 times — close
+a couple at the boundaries), and `propagatemark` 1,108,692 times, close
 to once per live/gray object, since a full cycle has no memory of
 previous progress and re-walks the whole reachable graph from the roots
 every time, survivors included.
 
 What stands out in the call graph is that everything happens in a small
 number of large bursts. `atomic` alone is 5.12% of total program
-instructions despite only 113 calls — each one is a complete
+instructions despite only 113 calls. Each one is a complete
 stop-the-world root rescan. `sweeplist`, called from inside those bursts,
 frees 1,973,725 objects across just 339 calls, about 5,800 per call.
 That's the direct cost of not keeping any partial sweep state between
@@ -89,7 +89,7 @@ cycles: every cycle restarts cold.
 
 This is Lua's actual default. `luaC_step` is called 1,159,341 times,
 essentially once per allocation once the debt counter crosses its
-threshold, with `singlestep` following it 1:1 — so the collector is
+threshold, with `singlestep` following it 1:1, so the collector is
 spread thin across the program instead of showing up in bursts.
 `sweeplist` is called much more often than under full GC (150,816
 times), but each call frees far fewer objects: 1,948,330 objects over
@@ -98,8 +98,8 @@ That's the whole idea behind incremental sweeping, small bounded chunks
 of work (`GCSWEEPMAX`, left at its default here) instead of one long
 pause. `propagatemark`'s total call count ends up close to what full GC
 does (just over a million, split across two call sites), because in the
-end every reachable object still gets traversed once per major cycle —
-incrementality only changes when that work happens, not how much of it
+end every reachable object still gets traversed once per major cycle.
+Incrementality only changes when that work happens, not how much of it
 there is. `atomic`, by contrast, is called only 3,940 times, since most
 marking has already happened incrementally by the time a cycle reaches
 the atomic phase.
@@ -131,7 +131,7 @@ the young generation can reclaim nearly everything without ever
 re-walking the long-lived `survivors` table or re-marking the full heap.
 The cost that does go up is `traversearray`, at 94,796,385 Ir (2.91%),
 the single largest GC-attributable line in this configuration and
-larger than the equivalent under incremental GC — minor cycles run far
+larger than the equivalent under incremental GC. Minor cycles run far
 more often than major cycles do under the other two policies, and each
 one re-scans the survivor array checking for old-to-young references.
 Each scan is cheap; there are just a lot of them. Overall it's still a
