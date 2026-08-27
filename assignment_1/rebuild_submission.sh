@@ -42,11 +42,29 @@ cp results/gcfuncs.txt "$STAGE/PartA/results/"
 cp results/fullgc.memcheck.log results/incrementalgc.memcheck.log results/generationalgc.memcheck.log "$STAGE/PartA/results/"
 
 # Each part's own folder gets the *modified files* (as the spec's
-# deliverable line literally asks for), not just the diff -- copied from
-# the one buildable tree at lua-5.5.0/src/, which is the source of truth.
+# deliverable line literally asks for), not just the diff. Most of them
+# are copied straight from the one buildable tree at lua-5.5.0/src/ (the
+# source of truth for the final, cumulative interpreter) -- that's
+# correct wherever a part's own files are never touched again by a
+# later part. lgc.c is the one exception: Part C.2 edits it again after
+# Part B, so a straight copy would silently include C.2's arena code in
+# what's supposed to be "Part B's lgc.c", next to a diff that only shows
+# Part B's small change. Reconstructed instead as pristine + only
+# PART_B_DIFF.patch, so the diff and the file in this folder agree.
+ORIG_COMMIT=8ec6b56   # "Adding Assignment 1": the untouched originals
+PARTB_SRC=$(mktemp -d)
+mkdir -p "$PARTB_SRC/assignment_1/lua-5.5.0/src"
+git -C .. show "$ORIG_COMMIT:assignment_1/lua-5.5.0/src/lgc.c" \
+  > "$PARTB_SRC/assignment_1/lua-5.5.0/src/lgc.c"
+git -C .. show "$ORIG_COMMIT:assignment_1/lua-5.5.0/src/lua.h" \
+  > "$PARTB_SRC/assignment_1/lua-5.5.0/src/lua.h"
+( cd "$PARTB_SRC" && patch -s -p1 < "$OLDPWD/PART_B_DIFF.patch" )
+
 mkdir -p "$STAGE/PartB/modified-src"
 cp PART_B_DIFF.patch README.md "$STAGE/PartB/"
-cp lua-5.5.0/src/lgc.c lua-5.5.0/src/lua.h "$STAGE/PartB/modified-src/"
+cp "$PARTB_SRC/assignment_1/lua-5.5.0/src/lgc.c" \
+   "$PARTB_SRC/assignment_1/lua-5.5.0/src/lua.h" "$STAGE/PartB/modified-src/"
+rm -rf "$PARTB_SRC"
 
 mkdir -p "$STAGE/PartC/C1/modified-src" "$STAGE/PartC/C2/modified-src"
 cp PART_C1_DIFF.patch PART_C1_DESIGN.md "$STAGE/PartC/C1/"
