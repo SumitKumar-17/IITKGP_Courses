@@ -41,13 +41,22 @@ cp results/fullgc.annotate.txt results/incrementalgc.annotate.txt results/genera
 cp results/gcfuncs.txt "$STAGE/PartA/results/"
 cp results/fullgc.memcheck.log results/incrementalgc.memcheck.log results/generationalgc.memcheck.log "$STAGE/PartA/results/"
 
-mkdir -p "$STAGE/PartB"
+# Each part's own folder gets the *modified files* (as the spec's
+# deliverable line literally asks for), not just the diff -- copied from
+# the one buildable tree at lua-5.5.0/src/, which is the source of truth.
+mkdir -p "$STAGE/PartB/modified-src"
 cp PART_B_DIFF.patch README.md "$STAGE/PartB/"
+cp lua-5.5.0/src/lgc.c lua-5.5.0/src/lua.h "$STAGE/PartB/modified-src/"
 
-mkdir -p "$STAGE/PartC/C1" "$STAGE/PartC/C2"
+mkdir -p "$STAGE/PartC/C1/modified-src" "$STAGE/PartC/C2/modified-src"
 cp PART_C1_DIFF.patch PART_C1_DESIGN.md "$STAGE/PartC/C1/"
+cp lua-5.5.0/src/lparser.c lua-5.5.0/src/lparser.h lua-5.5.0/src/lobject.h lua-5.5.0/src/lfunc.c \
+  "$STAGE/PartC/C1/modified-src/"
 cp PART_C2_DIFF.patch "$STAGE/PartC/C2/"
 cp PART_C2_DESIGN.md "$STAGE/PartC/C2/README.md"
+cp lua-5.5.0/src/lgc.c lua-5.5.0/src/lgc.h lua-5.5.0/src/lvm.c lua-5.5.0/src/ldo.c \
+  lua-5.5.0/src/lstate.c lua-5.5.0/src/lstate.h lua-5.5.0/src/ltable.c lua-5.5.0/src/ltable.h \
+  lua-5.5.0/src/lfunc.c "$STAGE/PartC/C2/modified-src/"
 
 mkdir -p "$STAGE/PartD"
 cp PART_D_REPORT.pdf PART_D_REPORT.md "$STAGE/PartD/"
@@ -57,21 +66,30 @@ rm -f "$STAGE/PartD/results/run.log" "$STAGE/PartD/results/DONE.marker"
 cat > "$STAGE/INDEX.md" <<'EOF'
 # Submission Layout
 
-- `lua-5.5.0/` — the complete, buildable interpreter source, with every
+- `lua-5.5.0/`: the complete, buildable interpreter source, with every
   part's changes applied cumulatively (`make linux` in `src/`, then
-  `./lua -v` should print `Lua 5.5.0`). Also holds the Part A driver
-  files (`fullgc.c`/`incrementalgc.c`/`generationalgc.c`), Part B's
+  `./lua -v` should print `Lua 5.5.0`). This is the single source of
+  truth for every modified file; each `Part*/modified-src/` folder
+  below is a copy of just the files that part's own diff touches, kept
+  alongside that part's diff and note per the assignment's own wording.
+  Also holds the Part A driver files
+  (`fullgc.c`/`incrementalgc.c`/`generationalgc.c`), Part B's
   verification driver (`sweeptest.c`), and the Lua-level verification
   scripts used throughout (`esctest.lua`, `arenatest.lua`, `rectest.lua`,
   `gentest.lua`, `corotest.lua`).
-- `testbench.lua` — the provided workload, unmodified, used as-is by
+- `testbench.lua`: the provided workload, unmodified, used as-is by
   every part.
-- `PartA/` — `PART_A_REPORT.pdf`/`.md` and `results/` (callgrind
+- `PartA/`: `PART_A_REPORT.pdf`/`.md` and `results/` (callgrind
   outputs, call-graph PNGs, annotated profiles, memcheck logs).
-- `PartB/` — `PART_B_DIFF.patch` and `README.md` (the design note).
-- `PartC/C1/` — `PART_C1_DIFF.patch` and `PART_C1_DESIGN.md` (the design note).
-- `PartC/C2/` — `PART_C2_DIFF.patch` and `README.md` (the design note).
-- `PartD/` — `PART_D_REPORT.pdf`/`.md` and `results/` (every callgrind
+- `PartB/`: `PART_B_DIFF.patch`, `README.md` (the design note), and
+  `modified-src/` (`lgc.c`, `lua.h`).
+- `PartC/C1/`: `PART_C1_DIFF.patch`, `PART_C1_DESIGN.md` (the design
+  note), and `modified-src/` (`lparser.c`, `lparser.h`, `lobject.h`,
+  `lfunc.c`).
+- `PartC/C2/`: `PART_C2_DIFF.patch`, `README.md` (the design note), and
+  `modified-src/` (`lgc.c`, `lgc.h`, `lvm.c`, `ldo.c`, `lstate.c`,
+  `lstate.h`, `ltable.c`, `ltable.h`, `lfunc.c`).
+- `PartD/`: `PART_D_REPORT.pdf`/`.md` and `results/` (every callgrind
   output, perf log, and `/usr/bin/time` log referenced in the report,
   plus the chart PNGs and the two scripts that produced them,
   `analyze.py`/`make_charts.py`).
