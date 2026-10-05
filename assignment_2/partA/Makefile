@@ -3,8 +3,12 @@ CXXFLAGS := -std=c++17 -O2 -g -fno-omit-frame-pointer -pthread -Wall -Wextra -I.
 BUILD    := build
 
 COMMON   := ../common/workload_gen.cpp
+SHARED   := ../common/driver_main.h ../common/workload_gen.h
 
 all: $(BUILD)/kvstore_test $(BUILD)/single_thread $(BUILD)/global_lock $(BUILD)/rwlock
+
+# The same two lock drivers with the unaligned layout, for tools/layout_sensitivity.sh only.
+ablation: $(BUILD)/global_lock_unaligned $(BUILD)/rwlock_unaligned
 
 $(BUILD):
 	mkdir -p $(BUILD)
@@ -12,14 +16,20 @@ $(BUILD):
 $(BUILD)/kvstore_test: kvstore_test.cpp kvstore.cpp kvstore.h | $(BUILD)
 	$(CXX) $(CXXFLAGS) -DNOVA_SYNC=0 kvstore_test.cpp kvstore.cpp -o $@
 
-$(BUILD)/single_thread: single_thread.cpp kvstore.cpp kvstore.h $(COMMON) | $(BUILD)
+$(BUILD)/single_thread: single_thread.cpp kvstore.cpp kvstore.h $(COMMON) $(SHARED) | $(BUILD)
 	$(CXX) $(CXXFLAGS) -DNOVA_SYNC=0 $< kvstore.cpp $(COMMON) -o $@
 
-$(BUILD)/global_lock: global_lock.cpp kvstore.cpp kvstore.h $(COMMON) | $(BUILD)
+$(BUILD)/global_lock: global_lock.cpp kvstore.cpp kvstore.h $(COMMON) $(SHARED) | $(BUILD)
 	$(CXX) $(CXXFLAGS) -DNOVA_SYNC=1 $< kvstore.cpp $(COMMON) -o $@
 
-$(BUILD)/rwlock: rwlock.cpp kvstore.cpp kvstore.h $(COMMON) | $(BUILD)
+$(BUILD)/rwlock: rwlock.cpp kvstore.cpp kvstore.h $(COMMON) $(SHARED) | $(BUILD)
 	$(CXX) $(CXXFLAGS) -DNOVA_SYNC=2 $< kvstore.cpp $(COMMON) -o $@
+
+$(BUILD)/global_lock_unaligned: global_lock.cpp kvstore.cpp kvstore.h $(COMMON) $(SHARED) | $(BUILD)
+	$(CXX) $(CXXFLAGS) -DNOVA_SYNC=1 -DNOVA_NO_ALIGN $< kvstore.cpp $(COMMON) -o $@
+
+$(BUILD)/rwlock_unaligned: rwlock.cpp kvstore.cpp kvstore.h $(COMMON) $(SHARED) | $(BUILD)
+	$(CXX) $(CXXFLAGS) -DNOVA_SYNC=2 -DNOVA_NO_ALIGN $< kvstore.cpp $(COMMON) -o $@
 
 test: $(BUILD)/kvstore_test
 	$(BUILD)/kvstore_test
@@ -34,4 +44,4 @@ check: | $(BUILD)
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all test check clean
+.PHONY: all ablation test check clean

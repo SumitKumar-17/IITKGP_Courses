@@ -22,13 +22,16 @@ struct DriverOptions {
     int readers = 8;
     int seconds = 5;
     long writer_rate = 50000;   // puts per second, 0 turns the writer off
+    bool csv = false;           // also print one machine-readable line
 };
 
 inline DriverOptions parse_options(int argc, char** argv) {
     DriverOptions o;
-    for (int i = 1; i + 1 < argc; i += 2) {
+    for (int i = 1; i < argc; i++) {
         std::string k = argv[i];
-        long v = std::atol(argv[i + 1]);
+        if (k == "--csv") { o.csv = true; continue; }
+        if (i + 1 >= argc) { std::fprintf(stderr, "missing value for %s\n", k.c_str()); std::exit(2); }
+        long v = std::atol(argv[++i]);
         if (k == "--readers") o.readers = (int)v;
         else if (k == "--seconds") o.seconds = (int)v;
         else if (k == "--writer-rate") o.writer_rate = v;
@@ -81,5 +84,8 @@ inline int driver_main(int argc, char** argv, const char* label, bool allow_writ
 
     std::string full = std::string(label) + "/r" + std::to_string(o.readers);
     print_results(full, res);
+    if (o.csv)
+        std::printf("csv,%s,%d,%ld,%.0f,%.4f,%.4f,%.4f\n", label, o.readers, res.total_ops, res.rps,
+                    res.p50_us, res.p99_us, res.p999_us);
     return 0;
 }

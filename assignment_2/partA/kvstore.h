@@ -20,7 +20,16 @@
 #define NOVA_SYNC 0
 #endif
 
-class KVStore {
+// Cache-line alignment of the store object and its fields. -DNOVA_NO_ALIGN builds the
+// unaligned layout, which exists only to reproduce the layout-sensitivity measurement
+// (tools/layout_sensitivity.sh).
+#ifdef NOVA_NO_ALIGN
+#define NOVA_CACHELINE
+#else
+#define NOVA_CACHELINE alignas(64)
+#endif
+
+class NOVA_CACHELINE KVStore {
 public:
     KVStore();
     ~KVStore();
@@ -61,16 +70,21 @@ private:
     void release(Slot& s);
     bool grow();
 
-    Slot* slots_;
+    // Layout matters to the lock benchmarks. The table header (read on every get)
+    // and the lock (written on every get) are put on separate cache lines, and the
+    // object itself is 64-byte aligned. Without that, where the lock word lands
+    // relative to the header depends on the size of the process environment, and
+    // the same binary measured anywhere between 8M and 26M reads/s.
+    NOVA_CACHELINE Slot* slots_;
     size_t cap_;
     size_t size_;
 
 #if NOVA_SYNC == 1
-    mutable std::mutex mu_;
+    NOVA_CACHELINE mutable std::mutex mu_;
     using ReadGuard = std::lock_guard<std::mutex>;
     using WriteGuard = std::lock_guard<std::mutex>;
 #elif NOVA_SYNC == 2
-    mutable std::shared_mutex mu_;
+    NOVA_CACHELINE mutable std::shared_mutex mu_;
     using ReadGuard = std::shared_lock<std::shared_mutex>;
     using WriteGuard = std::unique_lock<std::shared_mutex>;
 #endif

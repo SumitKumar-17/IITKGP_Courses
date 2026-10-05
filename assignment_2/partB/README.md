@@ -55,12 +55,12 @@ and measured `get` throughput with the Part A driver, 1 background writer, media
 
 | readers | epoch (M reads/s) | hazard pointers (M reads/s) |
 |---|---|---|
-| 1 | 14.7 | 14.6 |
-| 2 | 23.3 | 23.0 |
-| 4 | 46.2 | 43.1 |
-| 8 | 76.5 | 77.2 |
+| 1 | 14.9 | 14.9 |
+| 2 | 23.7 | 23.4 |
+| 4 | 43.5 | 40.1 |
+| 8 | 74.0 | 69.8 |
 
-**Reader speed does not separate them.** The reasons we kept epochs:
+**Reader speed barely separates them**: equal at 1 and 2 readers, epochs 4% to 8% ahead at 4 and 8 (the 8-reader runs overlap). The reasons we kept epochs:
 
 - A hazard pointer reader has to publish the pointer and then re-read `current_` to check it did not
   change, so it loads the pointer twice. The assignment asks for exactly one load. Epochs need one.
@@ -98,21 +98,21 @@ table in `results/design_sweep.txt`, summarised by `tools/summarize_design.py`):
 | design | put cost, 100k keys | reads, 100k keys | put cost, 1M keys | reads, 1M keys |
 |---|---|---|---|---|
 | copy whole table | **about 5 ms (extrapolated)** | n/a | n/a | n/a |
-| segment directory, inline slots | 3.3 us | 446M/s | 7.8 us | 176M/s |
-| segment directory, value pointers | 2.5 us | 417M/s | 5.7 us | 122M/s |
-| **64-way trie, 8 per leaf (chosen)** | **1.1 us** | 393M/s | **1.0 us** | 144M/s |
+| segment directory, inline slots | 3.9 us | 428M/s | 9.3 us | 169M/s |
+| segment directory, value pointers | 3.1 us | 387M/s | 7.1 us | 113M/s |
+| **64-way trie, 8 per leaf (chosen)** | **0.9 us** | 371M/s | **1.0 us** | 142M/s |
 
 The read columns come from a bare read loop with no per-call timing, so they are higher than the
-driver numbers and only comparable with each other. Whole-table copy cost 0.21 ms per put at 5,000 keys and 1.04 ms at 20,000 keys, growing with the
-table, so it cannot keep up with 50,000 puts per second at the workload's 100,000 keys. The segment
+driver numbers and only comparable with each other. Whole-table copy cost 0.23 ms per put at 5,000 keys, 0.51 ms at 10,000 and 1.06 ms at 20,000
+(`results/full_copy.txt`), growing in step with the table, so it cannot keep up with 50,000 puts per second at the workload's 100,000 keys. The segment
 directory copies a root of `NSEG` pointers plus one segment, which is cheap at 100k keys but grows
 with the table (the best segment count moves with table size, and growing it means rebuilding
 everything). The trie copies a path whose length grows only with the logarithm of the table, uses
 less memory (9 MB against 16 MB at 100k keys), builds its 1M-key table in 0.2 s against 2.7 s, and
 shares its copied path between several writes in one transaction, which Part C uses. It reads about
-12% to 18% slower than the segment directory in these runs. Every design here reads far faster than any
-locked store (the chosen one does 76.5M reads/s at 8 readers in the Part A driver, against 18.1M
-for the rwlock and 9.2M for the global lock, so 4.2x and 8.3x), so we took the flat write cost.
+13% to 16% slower than the segment directory in these runs. Every design here reads far faster than any
+locked store (the chosen one does 75M reads/s at 8 readers in the Part A driver, against 21M
+for the rwlock and 12M for the global lock, so 3.6x and 6.2x; Part D has the full tables), so we took the flat write cost.
 Every design in the benchmark checks all keys and values after loading.
 
 ## 5. Tests
@@ -120,7 +120,7 @@ Every design in the benchmark checks all keys and values after loading.
 | what | how | result |
 |---|---|---|
 | unit test | `make test`: insert, overwrite, erase, 500-byte values, 200k keys, erase everything and reuse, reclaim-batch bookkeeping | all pass |
-| **stress test, no torn rows** | `build/stress_test`: 6 readers `get` while the writer does `put` and `erase` on 5,000 keys for 5 s. Each row is a version number plus three words derived from it and the key; readers recompute them and also check a key's version never goes backwards | 4.8M writes, 527M reads, **0 torn rows, 0 regressions**, every retired version freed, no pass freed more than the batch |
+| **stress test, no torn rows** | `build/stress_test`: 6 readers `get` while the writer does `put` and `erase` on 5,000 keys for 5 s. Each row is a version number plus three words derived from it and the key; readers recompute them and also check a key's version never goes backwards | 5.5M writes, 682M reads, **0 torn rows, 0 regressions**, every retired version freed, no pass freed more than the batch (`results/tests.txt`) |
 | sanitizers | `make check`: AddressSanitizer + UBSan on the unit and stress tests, ThreadSanitizer on the stress test | clean (ASan found a real `new`/`free` mismatch on the way, fixed) |
 | does the test have teeth | build with `-DNOVA_BROKEN_RECLAIM`, which makes reclamation ignore readers, and run the stress test under ASan | `heap-use-after-free` in `find` within seconds |
 

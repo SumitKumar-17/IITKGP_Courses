@@ -67,15 +67,15 @@ put(long,const void*,size_t), bool commit(). get copies value out (no pointers i
   FlameGraph scripts not installed yet. perf_event_paranoid = -1.
 
 ## Status
-- Part A: done (store, test, 3 drivers, profiling, layout bench, REPORT.md/pdf). Store is an
-  open-addressing table, 64-byte inline slots; NOVA_SYNC=0/1/2 picks none/mutex/shared_mutex.
-  Drivers take --readers N --seconds S --writer-rate R (default 50k puts/s). Benchmarks are
-  pinned with `taskset -c 0-15` (P-cores). Measured: single 19.3M rps, global_lock 16.8M->9.5M,
-  rwlock peaks 19.5M at 2 readers, 18.0M at 8. Kernel frames in flame graphs need
-  `sudo sysctl kernel.kptr_restrict=0` (set back to 1 afterwards).
-- Part B: done (64-way path-copy trie, epoch reclamation, README, stress test). Store keeps
-  Version{root,count}; global epoch table of 1024 slots; batch default 64; set_reclaim_batch(0)
-  disables reclaim; reclaim_stats() exposes counters. Driver partB/rcu.cpp.
-- Part C: done (Transaction one-build-one-publish with first-committer-wins, index trie in Version,
-  Snapshot with lazy multi-store binding, keys(), join.h). Tests in partC/txn_test.cpp.
-- Part D, E: not started.
+- Parts A to D done and measured; Part E (bonus WAL) not started.
+- A: open-addressing table, 64-byte inline slots, NOVA_SYNC=0/1/2. Report partA/REPORT.md (4 pp).
+- B: 64-way path-copy trie, epoch reclamation, set_reclaim_batch (0 disables), reclaim_stats().
+- C: Transaction (one build, one publish, first-committer-wins), index trie in Version, Snapshot
+  (lazy multi-store binding), keys(), join.h, reclaim_all().
+- D: partD/REPORT.md (7 pp), bench.cpp harness, scripts d1/d1b/d2/d3.
+- **Benchmark layout trap**: store objects must be 64-byte aligned with the lock / version pointer on
+  its own cache line; results used to swing 3x with environment size. tools/envsweep.sh and
+  tools/layout_sensitivity.sh prove it. The provided generator also has false sharing between its
+  per-thread vectors (partD/experiments/padded_generator.sh).
+- Server was changed for measuring (performance governor, C2/C3 off, kptr_restrict=0). Restore with
+  tools/restore_server.sh. WORK.md (not submitted) has the whole story.

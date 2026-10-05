@@ -39,6 +39,7 @@ slow efficiency core and skews the numbers.
 - `kernel.kptr_restrict=0` while profiling, then back to `1`. Without it, perf cannot name kernel
   functions and the biggest part of the lock cost shows up as a useless `[unknown]` block.
   Command: `sudo sysctl -w kernel.kptr_restrict=0` (and `=1` afterwards).
+- Deep idle states off for the whole campaign: `echo 1 | sudo tee /sys/devices/system/cpu/cpu*/cpuidle/state[23]/disable`. Undo: write `0` to the same files. (Reason: waking a thread on a core in C2/C3 costs 127 us to 1 ms, which would distort every lock benchmark; as it turned out this was not the cause of our big discrepancy, see 1.11, but it is still the right setting for latency work.)
 - CPU governor and energy preference set to `performance` (it was `powersave` /
   `balance_performance`) to remove frequency ramping as a source of noise.
   Command: `echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor`
@@ -115,18 +116,19 @@ builds each driver with its own `-DNOVA_SYNC=n`. The table code is literally the
 ### 1.6 Throughput sweep (no profiler)
 
 `partA/scaling.sh` runs `single_thread` and both lock drivers at 1/2/4/8 readers, 3 repetitions,
-pinned to CPUs 0 to 15. Output in `partA/results/scaling.txt`. Means:
+pinned to CPUs 0 to 15. Output in `partA/results/scaling.txt`. Medians of the final run (aligned
+build, see 1.11):
 
 | readers | global_lock | rwlock |
 |---|---|---|
-| 1 | 16.7M | 16.7M |
-| 2 | 12.0M | 19.2M |
-| 4 | 11.1M | 18.0M |
-| 8 | 9.2M | 18.1M |
+| 1 | 17.1M | 17.0M |
+| 2 | 21.6M | 25.0M |
+| 4 | 24.3M | 27.8M |
+| 8 | 12.3M | 21.2M |
 
-`single_thread` with one reader: 19.4M. (Side fact for Part D: `single_thread --readers 8`, which is
-only legal with no writer, reaches about 94M reads/s, so unsynchronised read-only scales almost
-linearly. That is the ceiling the RCU store is trying to approach.)
+`single_thread` with one reader: 19.1M. (Side fact for Part D: `single_thread --readers 8`, which is
+only legal with no writer, reaches 90M+ reads/s, so unsynchronised read-only scales almost linearly.
+That is the ceiling the RCU store is trying to approach.)
 
 ### 1.7 Profiling: how and why this way
 
@@ -161,15 +163,15 @@ report (counters per thread count, and share of samples by category of the leaf 
 The spec asks: lock acquisition or cache-line bouncing? The answer is that it is different for
 the two locks.
 
-- `global_lock`, 8 readers: 56% of samples in the kernel futex path
-  (`native_queued_spin_lock_slowpath`, `futex_wait`, `futex_wake`, `lll_lock_wait`) and 447k context
-  switches per second. Threads sleep and wake. That is waiting for the lock.
-- `rwlock`, 8 readers: only 5.8% in the kernel, but 64% inside `pthread_rwlock_rdlock` and
-  `rdunlock`. Those are atomic add/sub on one shared reader counter. IPC falls from 1.66 to 0.38
-  and L1 misses per 1k instructions rise from 1.8 to 7.0, while last-level misses stay at about
-  0.03 per 1k instructions. The cache line holding the counter moves between cores' private
+- `global_lock`: 32% of samples in the kernel futex path already at 4 readers, 54% at 8
+  (`native_queued_spin_lock_slowpath`, `futex_wait`, `futex_wake`, `lll_lock_wait`), 494k context
+  switches per second at 8. Threads sleep and wake. That is waiting for the lock.
+- `rwlock`, 8 readers: only 5.6% in the kernel, but 65% inside `pthread_rwlock_rdlock` and
+  `rdunlock`. Those are atomic add/sub on one shared reader counter. IPC falls from 1.69 to 0.45
+  and L1 misses per 1k instructions rise from 1.9 to 6.4, while last-level misses stay at about
+  0.01 per 1k instructions. The cache line holding the counter moves between cores' private
   caches and never goes to memory. That is cache-line bouncing.
-- The plain `cache-miss %` is misleading (it falls from 28% to 4% as threads grow) because its
+- The plain `cache-miss %` is misleading (it falls from 25% to 3% as threads grow) because its
   denominator, cache references, grows with thread count. Misses per instruction is the
   honest metric.
 
@@ -198,6 +200,53 @@ what would change our mind (a column-scan workload).
 
 `partA/REPORT.md` (4 pages with the layout note). Key sentences are in bold. The rendered
 PDF is `partA/REPORT.pdf`. Rebuilt with `tools/pdf.sh partA/REPORT.md`.
+
+### 1.11 The layout trap (the biggest thing that went wrong, and how it was found)
+
+**Symptom.** Part A's lock numbers (global lock 9.2M reads/s at 8 readers) did not match a later
+full run of the same binaries inside the Part D scripts (global lock 21M at 4 readers, 13M at 8).
+Not a small difference: 2x to 3x, and each session was internally consistent.
+
+**What we suspected, in order, and what each test showed.**
+
+1. External load on the shared server. Checked `ps`, `uptime`, a 300 ms busy-loop per CPU
+   (`tools/cpucheck.c`): all cores were free. Not it.
+2. Deep C-states making futex wake-ups slow. Tested cold, warmed, and with C2/C3 disabled. Changed
+   the numbers a little, did not explain 3x.
+3. How the run was launched (`nohup`, `setsid`, piped to `awk`, wrapped in `/usr/bin/time`, other
+   working directory). Only the other working directory moved the result, which is absurd for a
+   program that touches no files. That was the clue.
+4. **Environment size.** Padding one unrelated environment variable by 0 to 120 bytes moved the
+   same binary between 8.4M, 11M and 26M, repeating with period 64 bytes (the cache-line size).
+
+**Cause.** The driver's `KVStore` is a local variable on the main thread's stack, so its address
+shifts with the size of the environment. Inside the object the lock and the table header
+(`slots_`, `cap_`, `size_`, read on every get) sat next to each other, so depending on the shift they
+were in the same cache line or not. The "same line" case makes every lock operation invalidate the
+line every reader needs, which is the worst case.
+
+**Fix.** `class alignas(64) KVStore`, the table header on one line, the lock alone on the next
+(`alignas(64)`). In the RCU stores `current_` is alone on its line and the writer's mutex, retire
+list and counters sit on others, because otherwise every put also invalidated the line readers load
+the version pointer from. The evidence is kept: `tools/layout_sensitivity.sh` builds the old layout
+(`-DNOVA_NO_ALIGN`) and the new one and sweeps the padding. Old layout global lock: 8.5M to 25.9M
+(3.05x spread). Aligned: 19.8M to 24.7M (1.25x). `tools/envsweep.sh` does the same for all stores.
+
+**Consequence.** Everything measured before the fix was thrown away and redone: Part A scaling
+and flame graphs, the Part B design sweep and scheme comparison (the benchmark harness had the same
+flaw), all of Part D. The Part A report's conclusions changed shape: the locks now scale to 4
+readers (1.4x and 1.6x) instead of never scaling, then collapse at 8. The diagnosis (waiting vs
+bouncing) survived.
+
+**A second layout problem, in the provided code.** The generator's `per_thread` latency vectors sit
+side by side, so concurrent `push_back` calls from different threads write one cache line.
+`partD/experiments/padded_generator.sh` pads them in a copy: RCU at 8 readers goes from 75.9M to
+109.8M reads/s. We kept the original for D.1 (the spec says use it) and added a histogram harness,
+which does not have this problem, for the rest.
+
+**Lesson, for next time.** If a concurrent benchmark depends on anything you did not mean to vary
+(working directory, environment, launch method), suspect memory layout first, and prove the fix
+with a sweep over the thing that should not matter.
 
 ---
 
@@ -244,8 +293,8 @@ objects with the epoch at the swap and frees a record only when its stamp is bel
 announced epoch. Records are in publish order so freeing is oldest first.
 
 To justify the choice we built the same store with hazard pointers (`partB/bench/kvstore_hp.cpp`)
-and ran `partB/compare_schemes.sh` (3 interleaved runs per reader count). Reads were the same
-within noise (76.5M vs 77.2M at 8 readers). Reasons for epochs are therefore not speed: hazard
+and ran `partB/compare_schemes.sh` (3 interleaved runs per reader count). Reads were close
+(epoch 74.0M vs hazard 69.8M at 8 readers, equal at 1 to 2 readers). Reasons for epochs are therefore not speed: hazard
 pointers need a second load to validate the pointer (spec says exactly one load), and their usual
 advantage disappears because versions share most nodes, so any pinned reader blocks everything newer
 anyway. Part C snapshots also fit epochs naturally (a slot that stays announced).
@@ -267,14 +316,13 @@ which is what Part D.2's "no reclamation" reference uses. `reclaim_stats()` expo
 - TSan does not model `atomic_thread_fence`, so its clean result is weaker than the ASan control.
 - The hazard-pointer variant also passes the ASan stress test.
 
-### 2.5 First numbers (full tables come in Part D)
+### 2.5 Numbers (final, aligned build; full tables are in Part D)
 
-`build/rcu --readers N`, pinned to CPUs 0 to 15, background writer at 50k puts/s, M reads/s:
-1 reader 14.7, 2 readers 23.3, 4 readers 46.2, 8 readers 76.5. Locks at 8 readers were 9.2
-(global) and 18.1 (rwlock). Tail latency p999 is 0.2 us for RCU against 5 to 7.7 us for the locks.
-One honest point: at 1 reader RCU (14.7M) is slower than the plain mutex (16.7M), because every
-read does the epoch announce (a locked instruction) and two more dependent loads through the trie.
-It wins by scaling, not by single-thread speed.
+Part A driver, background writer at 50k puts/s, M reads/s: 1 reader 14.8, 2 readers 23.6, 4 readers
+42.2, 8 readers 75.2. Locks at 8 readers: 12.2 (global) and 20.8 (rwlock). Tail latency p999 is 0.26
+us for RCU against 4.8 to 6.5 us for the locks. One honest point: at 1 reader RCU (14.8M) is slower
+than the plain mutex (17.1M), because every read does the epoch announce (a locked instruction) and
+walks the trie. It wins by scaling, not by single-thread speed.
 
 ### 2.6 Deliverable files
 
@@ -325,14 +373,14 @@ uses one snapshot for every call.
 
 | test | evidence |
 |---|---|
-| atomicity | 1.9M to 2.3M 8-key commits, readers read all 8 through a snapshot, 0 torn |
-| atomicity control | same readers vs 8 separate `put()`s: about 30M torn snapshots, so the check can fail |
+| atomicity | 3.0M 8-key commits, readers read all 8 through a snapshot, 0 torn |
+| atomicity control | same readers vs 8 separate `put()`s: 28M torn snapshots, so the check can fail |
 | lost update | two transactions, same key: second `commit()` false, nothing visible |
 | write skew | doctors on call: both commit, 0 on call (this is SI, not serializable) |
-| isolation | one held snapshot, 105M reads, 1.3M concurrent commits and erases, 0 changes |
-| reclaim drain | after releasing, 23,063 writes drained a 1.4M-version backlog; no pass freed more than 64 |
-| index | index vs full scan inside one snapshot while writers run: 0 mismatches in 66k checks |
-| join | 41k joins against a writer rewriting instruments in one transaction: all consistent; re-running on a held snapshot gives the identical result hash |
+| isolation | one held snapshot, 103M reads, 1.3M concurrent commits and erases, 0 changes |
+| reclaim drain | after releasing, 23,374 writes drained a 1.4M-version backlog; no pass freed more than 64 |
+| index | index vs full scan inside one snapshot while writers run: 0 mismatches in 66.6k checks |
+| join | 40.7k joins against a writer rewriting instruments in one transaction: all consistent; re-running on a held snapshot gives the identical result hash |
 
 Gotchas met on the way:
 
@@ -348,3 +396,82 @@ Gotchas met on the way:
 
 `partC/{kvstore.h,kvstore.cpp,join.h,schema.h,kvstore_test.cpp,txn_test.cpp,stress_test.cpp,rcu.cpp,Makefile,README.md,PART_C_DIFF.patch}`.
 Diff made with `diff -u --label partB/kvstore.h --label partC/kvstore.h partB/kvstore.h partC/kvstore.h` (and .cpp).
+
+---
+
+## 4. Part D
+
+### 4.1 What the spec wants (short)
+
+D.1: point-get throughput and p50/p99/p999 for single-thread, global lock, rwlock and RCU at 1/2/4/8
+readers with a background writer, where each lock version stops scaling, whether RCU holds 100k+ reads/s
+at 8 readers (flame graph if not). D.2: reclaim batch at four or more values, read RPS and the longest
+reader stall, plus a no-reclaim reference and a naive stop-the-world reference. D.3: join throughput
+with writer on vs paused, commit throughput for 1/4/16 keys per transaction, bounded vs stop-the-world
+pause, and an explanation of when copy-on-write hurts.
+
+### 4.2 Decisions
+
+- **Two instruments.** D.1 must use the provided generator, so `common/driver_main.h` (background
+  writer, `--csv`) wraps it. But the generator only reports p50/p99/p999, not the maximum that D.2
+  asks for, so `partD/bench.cpp` reads the store the same way (same trades, 80% hot / 20% random, every
+  call timed) with a log-linear histogram per thread. Percentiles within 1.6%, maximum exact. It also
+  avoids the generator's shared-vector-header problem (1.11), so we report D.1 both ways.
+- **`single_thread` and the writer.** An unsynchronised store cannot run with a concurrent writer, so
+  D.1 shows it with one reader (the real single-thread case) and, as a labelled ceiling, with more
+  read-only readers and no writer.
+- **D.2 needs backlog.** Short reads never fall behind, so with the D.1 workload reclamation has almost
+  nothing to do and every batch looks the same. A second "bursty" scenario adds a thread that pins a
+  snapshot for 50 ms of every 100 ms and a 300k puts/s writer, so a 15k-version backlog builds and must
+  be drained. Both scenarios are reported.
+- **Naive stop-the-world is built in the harness, not the store.** The store only gained an unbounded
+  `reclaim_all()`. The harness parks its reader threads at operation boundaries (a flag and a counter),
+  calls `reclaim_all()`, releases them. The park time counts in the readers' latency, so it shows as
+  the stall. First version re-froze on every write when a pinned snapshot kept the backlog above the
+  trigger (326,749 freezes in 3 s), which made the reference unfairly bad; fixed so it waits for
+  another T retired versions after each freeze.
+- **Idle check before each group**, reading `/proc/stat` twice (it spins nothing). The first version
+  used a spin loop on every core, which both warmed the cores and, by a bug in the awk field index,
+  reported nonsense; replaced.
+
+### 4.3 Commands
+
+On the server, everything is `tools/run_everything.sh` (tests, Part A, Part B design sweep and scheme
+comparison, then `partD/run_all.sh` = `d1.sh`, `d2.sh`, `d3.sh`, `profile_rcu.sh`, then
+`tools/envsweep.sh`). Extra experiments: `partD/d1b.sh` (D.1 in the harness),
+`partD/experiments/padded_generator.sh`, `partD/experiments/join_placement.sh`,
+`tools/layout_sensitivity.sh`, `tools/record_tests.sh`. Summaries: `python3 tools/summarize_d.py d1|d1b|d2|d3`,
+charts `python3 tools/make_charts.py`. Reports: `tools/pdf.sh partD/REPORT.md`.
+
+### 4.4 Results in one paragraph each
+
+- **D.1.** Locks stop scaling at 2 readers (21.5M and 24.8M in the generator) and get worse at 8
+  (12.2M and 20.8M); RCU keeps scaling (14.8M at 1, 75.2M at 8 in the generator, 112M in the harness,
+  7.6x). 100k target met about 750 times over. RCU loses to a mutex at 1 reader (14.8M vs 17.1M). The
+  RCU flame graph shows about 69% of the time is the generator's own measurement.
+- **D.2.** Batch size changes neither throughput (99.3M to 100.1M) nor the longest reader stall (about
+  0.1 to 0.2 ms, which is the machine's noise floor). It changes the length of one reclaim pass,
+  linearly (about 0.75 us per version: 12 us at batch 1, 3.1 ms at 4096). Not reclaiming costs 2% of
+  speed but 3.2 GB. Stop-the-world stalls the readers 11.9 to 20.9 ms and costs 20% to 24% throughput.
+  This is not the "bigger batch, longer stall" the spec expected, and the report says why.
+- **D.3.** The writer costs a running join nothing measurable (and the 1000-row join was 10% faster with
+  it, repeatably, not explained, not thread placement). Under 8 readers RCU commits 6x to 13x more
+  per second than the lock store and its readers run 6x faster. One 100,000-key transaction is 4x slower
+  than in place and needs 48 MB extra, which is the answer to "when does COW hurt".
+
+### 4.5 Mistakes worth remembering
+
+- Launching a background job before pushing the new scripts to the server (twice): the job failed
+  instantly and the "finished" monitor fired. Always `./syncer.sh push` before a `run`.
+- `pkill -f run_all.sh` inside the same ssh command matched the shell running it and killed it. Kill
+  by pid.
+- Trusting a number because it was consistent. The D.1 lock numbers were perfectly repeatable and
+  wrong (for the question we were asking), because they sat in one memory-layout regime.
+- The first version of every claim in the reports was checked against the data files line by line
+  before the PDF was built; about ten wording errors were found that way (a profile row that counted
+  one thing twice, ratios taken against the wrong baseline, a hypothesis stated as fact).
+
+### 4.6 Server state to restore when you are done
+
+`tools/restore_server.sh` (needs the sudo password): governor back to `powersave`, energy preference
+to `balance_performance`, deep idle states on, `kptr_restrict=1`.

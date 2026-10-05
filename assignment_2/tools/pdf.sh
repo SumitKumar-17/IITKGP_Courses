@@ -10,6 +10,11 @@ md="$1"
 pdf="${md%.md}.pdf"
 
 ./syncer.sh push
+# results/ is not part of a normal push, but the report embeds its images
+if [ -d "$(dirname "$md")/results" ]; then
+  rsync -az -e 'ssh -o BatchMode=yes' --include='*/' --include='*.png' --exclude='*' \
+    "$(dirname "$md")/results/" "$SERVER:$REMOTE/$(dirname "$md")/results/"
+fi
 ssh -o BatchMode=yes "$SERVER" "cat > /tmp/fixrules.tex <<'X'
 \\renewcommand{\\toprule}[1][]{}
 \\renewcommand{\\midrule}[1][]{}

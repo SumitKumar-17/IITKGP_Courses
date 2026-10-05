@@ -25,7 +25,7 @@ struct StagedWrite {
     size_t len;
 };
 
-class KVStore {
+class alignas(64) KVStore {
 public:
     KVStore();
     ~KVStore();
@@ -48,6 +48,10 @@ public:
         uint64_t max_pass_ns;
     };
     ReclaimStats reclaim_stats() const;
+    // Frees every retired version no reader can still need, with no bound. Meant for
+    // tests and for the stop-the-world comparison in Part D; the normal path is the
+    // bounded pass. Returns how many versions it freed.
+    size_t reclaim_all();
 
     size_t size() const;
 
@@ -105,10 +109,17 @@ private:
     bool commit_writes(const std::vector<StagedWrite>& writes, const std::vector<char>& data,
                        uint64_t start_seq);
     void publish(Version* old, const Build& b);
+    size_t free_records(uint64_t limit);
     void reclaim_pass();
 
-    std::atomic<Version*> current_;
-    std::mutex write_mu_;
+    // Layout: readers only ever touch current_ (and index_len_, written once), so
+    // they get a cache line to themselves. Everything the writer changes on each
+    // publish (lock, retire list, counters) lives on other lines; otherwise every
+    // put would also invalidate the line readers load the version pointer from.
+    alignas(64) std::atomic<Version*> current_;
+    std::atomic<size_t> index_len_{0};   // read by index_get without the writer lock
+
+    alignas(64) std::mutex write_mu_;
 
     // Writer-side state, guarded by write_mu_.
     std::vector<void*> pending_;
@@ -116,7 +127,6 @@ private:
     Garbage* gc_tail_ = nullptr;
     uint64_t build_seq_ = 0;
     size_t index_off_ = 0;
-    std::atomic<size_t> index_len_{0};   // read by index_get without the writer lock
     bool has_index_ = false;
 
     std::atomic<uint64_t> commit_seq_{0};   // sequence number of the newest published version

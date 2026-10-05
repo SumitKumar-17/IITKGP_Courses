@@ -40,10 +40,10 @@
 +    size_t len;
 +};
 +
- class KVStore {
+ class alignas(64) KVStore {
  public:
      KVStore();
-@@ -30,32 +36,75 @@
+@@ -30,39 +36,88 @@
      bool get(long key, void* value_out, size_t value_out_len) const;
      bool erase(long key);
  
@@ -67,6 +67,10 @@
 +        uint64_t max_pass_ns;
      };
      ReclaimStats reclaim_stats() const;
++    // Frees every retired version no reader can still need, with no bound. Meant for
++    // tests and for the stop-the-world comparison in Part D; the normal path is the
++    // bounded pass. Returns how many versions it freed.
++    size_t reclaim_all();
  
      size_t size() const;
  
@@ -128,15 +132,27 @@
 +    bool commit_writes(const std::vector<StagedWrite>& writes, const std::vector<char>& data,
 +                       uint64_t start_seq);
 +    void publish(Version* old, const Build& b);
++    size_t free_records(uint64_t limit);
      void reclaim_pass();
  
-     std::atomic<Version*> current_;
-@@ -66,32 +115,40 @@
+-    // Layout: readers only ever touch current_, so it gets a cache line to itself.
+-    // Everything the writer changes on each publish (lock, retire list, counters)
+-    // lives on other lines; otherwise every put would also invalidate the line
+-    // readers load the version pointer from.
++    // Layout: readers only ever touch current_ (and index_len_, written once), so
++    // they get a cache line to themselves. Everything the writer changes on each
++    // publish (lock, retire list, counters) lives on other lines; otherwise every
++    // put would also invalidate the line readers load the version pointer from.
+     alignas(64) std::atomic<Version*> current_;
++    std::atomic<size_t> index_len_{0};   // read by index_get without the writer lock
+ 
+     alignas(64) std::mutex write_mu_;
+ 
+@@ -71,32 +126,39 @@
      Garbage* gc_head_ = nullptr;
      Garbage* gc_tail_ = nullptr;
      uint64_t build_seq_ = 0;
 +    size_t index_off_ = 0;
-+    std::atomic<size_t> index_len_{0};   // read by index_get without the writer lock
 +    bool has_index_ = false;
 +
 +    std::atomic<uint64_t> commit_seq_{0};   // sequence number of the newest published version
@@ -731,14 +747,52 @@
      pending_.push_back(old);
  
      Garbage* g = static_cast<Garbage*>(std::malloc(sizeof(Garbage) + pending_.size() * sizeof(void*)));
-@@ -420,6 +718,24 @@
+@@ -393,18 +691,17 @@
+     reclaim_pass();
+ }
+ 
+-// Frees at most batch_ retired versions, oldest first, and only those that no
++// Frees up to limit retired versions, oldest first, and only those that no
+ // reader can still be using. It never waits: a version that is still pinned
+ // just stays on the list for a later pass.
+-void KVStore::reclaim_pass() {
+-    int batch = batch_.load(std::memory_order_relaxed);
+-    if (batch <= 0 || !gc_head_) return;
++size_t KVStore::free_records(uint64_t limit) {
++    if (!gc_head_) return 0;
+     uint64_t floor = min_active_epoch();
+-    if (gc_head_->epoch >= floor) return;
++    if (gc_head_->epoch >= floor) return 0;
+ 
+     auto t0 = std::chrono::steady_clock::now();
+     uint64_t n = 0;
+-    while (gc_head_ && gc_head_->epoch < floor && n < static_cast<uint64_t>(batch)) {
++    while (gc_head_ && gc_head_->epoch < floor && n < limit) {
+         Garbage* g = gc_head_;
+         gc_head_ = g->next;
+         if (!gc_head_) gc_tail_ = nullptr;
+@@ -418,8 +715,38 @@
+     passes_.fetch_add(1, std::memory_order_relaxed);
+     if (n > max_pass_freed_.load(std::memory_order_relaxed)) max_pass_freed_.store(n, std::memory_order_relaxed);
      if (ns > max_pass_ns_.load(std::memory_order_relaxed)) max_pass_ns_.store(ns, std::memory_order_relaxed);
++    return n;
  }
  
 -bool KVStore::create_index(size_t, size_t) { return false; }
-+// ----------------------------------------------------------- transactions
++void KVStore::reclaim_pass() {
++    int batch = batch_.load(std::memory_order_relaxed);
++    if (batch <= 0) return;
++    free_records(static_cast<uint64_t>(batch));
++}
  
 -int KVStore::index_get(const void*, size_t, long*, int) const { return 0; }
++size_t KVStore::reclaim_all() {
++    std::lock_guard<std::mutex> g(write_mu_);
++    return free_records(~uint64_t(0));
++}
++
++// ----------------------------------------------------------- transactions
++
 +Transaction::Transaction(KVStore& store)
 +    : store_(store), start_seq_(store.commit_seq_.load(std::memory_order_acquire)) {}
 +

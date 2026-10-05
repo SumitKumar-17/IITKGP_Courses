@@ -1,0 +1,8 @@
+store readers original_M padded_M   (median of 5, alternating)
+global_lock  4     17.7     24.9
+global_lock  8     12.1     12.1
+rwlock       4     20.9     23.3
+rwlock       8     20.6     23.8
+rcu          4     41.2     58.1
+rcu          8     75.9    109.8
+rcu_c        8     75.2    109.5

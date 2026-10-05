@@ -1,22 +1,22 @@
-# started on Mon Oct  5 22:32:26 2026
+# started on Tue Oct  6 01:05:39 2026
 
 
- Performance counter stats for process id '3311711':
+ Performance counter stats for process id '3349970':
 
-         14,721.71 msec task-clock                       #    4.905 CPUs utilized             
+         14,436.37 msec task-clock                       #    4.811 CPUs utilized             
      <not counted>      cpu_atom/cycles/                                                        (0.00%)
-   79,36,11,58,741      cpu_core/cycles/                 #    5.391 GHz                       
+   76,20,91,08,440      cpu_core/cycles/                 #    5.279 GHz                       
      <not counted>      cpu_atom/instructions/                                                  (0.00%)
-   72,49,87,31,173      cpu_core/instructions/           #    0.91  insn per cycle            
+   68,31,20,95,205      cpu_core/instructions/           #    0.90  insn per cycle            
      <not counted>      cpu_atom/cache-references/                                              (0.00%)
-      32,20,31,558      cpu_core/cache-references/       #   21.875 M/sec                     
+      29,49,47,218      cpu_core/cache-references/       #   20.431 M/sec                     
      <not counted>      cpu_atom/cache-misses/                                                  (0.00%)
-       2,48,67,364      cpu_core/cache-misses/           #    7.72% of all cache refs         
+       2,76,21,902      cpu_core/cache-misses/           #    9.37% of all cache refs         
    <not supported>      cpu_atom/L1-dcache-load-misses/                                       
-      30,87,65,352      cpu_core/L1-dcache-load-misses/                                       
+      22,88,42,451      cpu_core/L1-dcache-load-misses/                                       
      <not counted>      cpu_atom/LLC-load-misses/                                               (0.00%)
-         11,04,619      cpu_core/LLC-load-misses/                                             
-          1,82,669      context-switches                 #   12.408 K/sec                     
+          9,66,668      cpu_core/LLC-load-misses/                                             
+          3,84,439      context-switches                 #   26.630 K/sec                     
 
-       3.001189963 seconds time elapsed
+       3.000794829 seconds time elapsed
 

@@ -56,9 +56,12 @@ struct Garbage {
     void* p[24];
 };
 
-struct Base {
+// Layout: each design's `cur` (the only thing readers load) sits on a cache line of
+// its own, away from the writer's bookkeeping below. Sharing a line made the readers'
+// numbers depend on where the object happened to land.
+struct alignas(64) Base {
     Epochs ep;
-    Garbage *head = nullptr, *tail = nullptr;
+    alignas(64) Garbage *head = nullptr, *tail = nullptr;
     Garbage* open = nullptr;
     size_t batch = 1 << 30;
     size_t retired = 0, freed = 0, peak = 0;
@@ -89,7 +92,7 @@ struct Base {
 struct Full : Base {
     struct alignas(64) Slot { long key; uint32_t len, used; char v[48]; };
     struct Root { size_t cap, n; Slot s[]; };
-    std::atomic<Root*> cur;
+    alignas(64) std::atomic<Root*> cur;
     Full() {
         Root* r = (Root*)std::aligned_alloc(64, 64 + 64 * sizeof(Slot));
         r->cap = 64; r->n = 0; std::memset(r->s, 0, 64 * sizeof(Slot)); cur = r;
@@ -137,7 +140,7 @@ struct DirSeg : Base {
     struct Root { size_t n; Seg* dir[]; };
 
     size_t nseg, shift;
-    std::atomic<Root*> cur;
+    alignas(64) std::atomic<Root*> cur;
 
     explicit DirSeg(size_t nseg_) : nseg(nseg_) {
         shift = 64 - __builtin_ctzll(nseg);
@@ -208,7 +211,7 @@ struct Trie : Base {
     struct Val { uint32_t len; char d[44]; };
     struct Leaf { uint32_t n, pad; long k[]; };   // k[n] keys, then n Vals
     struct Node { uintptr_t c[FAN]; };            // low bit set: leaf; 0: empty
-    std::atomic<uintptr_t> cur{0};
+    alignas(64) std::atomic<uintptr_t> cur{0};
 
     static bool is_leaf(uintptr_t p) { return p & 1; }
     static Leaf* leaf(uintptr_t p) { return (Leaf*)(p & ~1ULL); }

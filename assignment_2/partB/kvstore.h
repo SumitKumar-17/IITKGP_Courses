@@ -19,7 +19,7 @@
 #include <utility>
 #include <vector>
 
-class KVStore {
+class alignas(64) KVStore {
 public:
     KVStore();
     ~KVStore();
@@ -58,8 +58,13 @@ private:
     void publish(Version* old, uintptr_t root, long delta);
     void reclaim_pass();
 
-    std::atomic<Version*> current_;
-    std::mutex write_mu_;
+    // Layout: readers only ever touch current_, so it gets a cache line to itself.
+    // Everything the writer changes on each publish (lock, retire list, counters)
+    // lives on other lines; otherwise every put would also invalidate the line
+    // readers load the version pointer from.
+    alignas(64) std::atomic<Version*> current_;
+
+    alignas(64) std::mutex write_mu_;
 
     // Writer-side state, guarded by write_mu_.
     std::vector<void*> pending_;

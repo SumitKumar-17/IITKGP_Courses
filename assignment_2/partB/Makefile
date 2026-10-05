@@ -2,6 +2,7 @@ CXX      ?= g++
 CXXFLAGS := -std=c++17 -O2 -g -fno-omit-frame-pointer -pthread -Wall -Wextra -I. -I../common
 BUILD    := build
 COMMON   := ../common/workload_gen.cpp
+SHARED   := ../common/driver_main.h ../common/workload_gen.h
 STORE    := kvstore.cpp kvstore.h
 
 all: $(BUILD)/kvstore_test $(BUILD)/stress_test $(BUILD)/rcu
@@ -15,7 +16,7 @@ $(BUILD)/kvstore_test: kvstore_test.cpp $(STORE) | $(BUILD)
 $(BUILD)/stress_test: stress_test.cpp $(STORE) | $(BUILD)
 	$(CXX) $(CXXFLAGS) stress_test.cpp kvstore.cpp -o $@
 
-$(BUILD)/rcu: rcu.cpp $(STORE) $(COMMON) | $(BUILD)
+$(BUILD)/rcu: rcu.cpp $(STORE) $(COMMON) $(SHARED) | $(BUILD)
 	$(CXX) $(CXXFLAGS) rcu.cpp kvstore.cpp $(COMMON) -o $@
 
 test: $(BUILD)/kvstore_test $(BUILD)/stress_test

@@ -691,18 +691,17 @@ void KVStore::publish(Version* old, const Build& b) {
     reclaim_pass();
 }
 
-// Frees at most batch_ retired versions, oldest first, and only those that no
+// Frees up to limit retired versions, oldest first, and only those that no
 // reader can still be using. It never waits: a version that is still pinned
 // just stays on the list for a later pass.
-void KVStore::reclaim_pass() {
-    int batch = batch_.load(std::memory_order_relaxed);
-    if (batch <= 0 || !gc_head_) return;
+size_t KVStore::free_records(uint64_t limit) {
+    if (!gc_head_) return 0;
     uint64_t floor = min_active_epoch();
-    if (gc_head_->epoch >= floor) return;
+    if (gc_head_->epoch >= floor) return 0;
 
     auto t0 = std::chrono::steady_clock::now();
     uint64_t n = 0;
-    while (gc_head_ && gc_head_->epoch < floor && n < static_cast<uint64_t>(batch)) {
+    while (gc_head_ && gc_head_->epoch < floor && n < limit) {
         Garbage* g = gc_head_;
         gc_head_ = g->next;
         if (!gc_head_) gc_tail_ = nullptr;
@@ -716,6 +715,18 @@ void KVStore::reclaim_pass() {
     passes_.fetch_add(1, std::memory_order_relaxed);
     if (n > max_pass_freed_.load(std::memory_order_relaxed)) max_pass_freed_.store(n, std::memory_order_relaxed);
     if (ns > max_pass_ns_.load(std::memory_order_relaxed)) max_pass_ns_.store(ns, std::memory_order_relaxed);
+    return n;
+}
+
+void KVStore::reclaim_pass() {
+    int batch = batch_.load(std::memory_order_relaxed);
+    if (batch <= 0) return;
+    free_records(static_cast<uint64_t>(batch));
+}
+
+size_t KVStore::reclaim_all() {
+    std::lock_guard<std::mutex> g(write_mu_);
+    return free_records(~uint64_t(0));
 }
 
 // ----------------------------------------------------------- transactions

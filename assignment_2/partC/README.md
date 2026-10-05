@@ -33,15 +33,15 @@ several keys with separate plain `get()` calls can straddle two commits, because
 current version again. To read several keys together, take a `Snapshot` and use it for all of them.
 
 Test: a writer commits 8-key transactions (every key gets the same new number) while 4 readers each
-take a snapshot, read the 8 keys and require them to be equal. **1.9 to 2.3 million transactions,
+take a snapshot, read the 8 keys and require them to be equal. **3.0 million transactions,
 0 torn snapshots.** The control uses the same readers against a writer that makes 8 separate `put()`
-calls: it produces **30 million torn snapshots**, so the check does fail when atomicity is missing.
+calls: it produces **28 million torn snapshots**, so the check does fail when atomicity is missing.
 
 ### Isolation, and which level this is
 
 Every read through a `Snapshot` sees one immutable version for as long as the handle lives, however
 many versions the writer publishes meanwhile, and the writer never waits for a reader. Test: a held
-snapshot read 105 million times (and `keys()` re-enumerated) while the writer made 1.3 million
+snapshot read 103 million times (and `keys()` re-enumerated) while the writer made 1.3 million
 commits and erased keys: **0 changes seen**, and the writer made progress the whole time.
 
 **The level is snapshot isolation, not serializability.** Precisely:
@@ -112,7 +112,7 @@ new one inserted in the same commit; when only other bytes change, the index is 
 slot, so ordinary calls made while it is held do not disturb it). While it is alive nothing newer
 than its epoch is freed, whatever the reclaim batch. A held snapshot is therefore a memory cost, not a
 blocking one: in the isolation test the writer retired about 1.4 million versions while one snapshot
-was held, and **the backlog was freed again, 64 versions per write, within 23,000 writes of releasing
+was held, and **the backlog was freed again, 64 versions per write, within 23,400 writes of releasing
 it**, with no pass ever freeing more than 64.
 
 The benchmark's two tables are two `KVStore` objects, but the join must use one handle. A snapshot
@@ -140,8 +140,8 @@ Tests (`txn_test`, all also run under AddressSanitizer, UBSan and ThreadSanitize
 
 | what | result |
 |---|---|
-| index vs a scan of the table, in the same snapshot, while the writer does puts, erases, field changes and transactions | 0 mismatches in 66,000 comparisons |
-| 4 readers joining 5,000 trades with 50 instruments while the writer rewrites instruments in one transaction and changes and deletes trades | 41,000 joins, 0 inconsistent: every pair has equal symbols, one match per trade, one `tick_size` throughout |
+| index vs a scan of the table, in the same snapshot, while the writer does puts, erases, field changes and transactions | 0 mismatches in 66,600 comparisons |
+| 4 readers joining 5,000 trades with 50 instruments while the writer rewrites instruments in one transaction and changes and deletes trades | 40,700 joins, 0 inconsistent: every pair has equal symbols, one match per trade, one `tick_size` throughout |
 | one snapshot, join result hashed, writes made, hashed again | identical; a fresh snapshot hashes differently |
 | lost update (two transactions, one key) | second refused, nothing from it visible |
 | write skew (doctors) | reproduced, 0 on call |
@@ -155,6 +155,6 @@ snapshots in the process; no durability.
 
 ## Files
 
-`kvstore.h`, `kvstore.cpp`, `join.h`, `schema.h`, `kvstore_test.cpp`, `txn_test.cpp`,
+`kvstore.h`, `kvstore.cpp`, `join.h`, `../common/schema.h`, `kvstore_test.cpp`, `txn_test.cpp`,
 `stress_test.cpp` (carried over from Part B), `rcu.cpp`, `Makefile` (`make test`, `make check`),
 `PART_C_DIFF.patch`.

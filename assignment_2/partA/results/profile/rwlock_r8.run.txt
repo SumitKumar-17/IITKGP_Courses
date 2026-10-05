@@ -1,1 +1,1 @@
-rwlock/r8      ops=190240809 rps=17294619   p50=0.3    us p99=5.4    us p999=8.6    us
+rwlock/r8      ops=206075670 rps=18734152   p50=0.2    us p99=4.9    us p999=8.6    us
