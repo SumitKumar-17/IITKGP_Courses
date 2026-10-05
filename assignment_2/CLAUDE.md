@@ -73,4 +73,7 @@ put(long,const void*,size_t), bool commit(). get copies value out (no pointers i
   pinned with `taskset -c 0-15` (P-cores). Measured: single 19.3M rps, global_lock 16.8M->9.5M,
   rwlock peaks 19.5M at 2 readers, 18.0M at 8. Kernel frames in flame graphs need
   `sudo sysctl kernel.kptr_restrict=0` (set back to 1 afterwards).
-- Part B, C, D, E: not started.
+- Part B: done (64-way path-copy trie, epoch reclamation, README, stress test). Store keeps
+  Version{root,count}; global epoch table of 1024 slots; batch default 64; set_reclaim_batch(0)
+  disables reclaim; reclaim_stats() exposes counters. Driver partB/rcu.cpp.
+- Part C, D, E: not started.

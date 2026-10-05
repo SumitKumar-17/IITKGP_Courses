@@ -203,4 +203,81 @@ PDF is `partA/REPORT.pdf`. Rebuilt with `tools/pdf.sh partA/REPORT.md`.
 
 ## 2. Part B
 
-(Filled in as we go. See below.)
+### 2.1 What the spec wants (short)
+
+Replace the locks inside the same `KVStore` class with RCU: the writer builds a new version off to
+the side and publishes it with one atomic pointer swap; a reader does exactly one atomic load of
+that pointer and works on that snapshot. Old versions are freed by epoch-based or hazard-pointer
+reclamation, bounded by a tunable `set_reclaim_batch(int n)`. Deliverable: store + diff vs Part A,
+a README on the reclamation design and the parameter, and a stress test showing no torn rows.
+
+### 2.2 The main question: what do we copy on each write?
+
+Copying the whole table per put is the textbook RCU and it does not work for 100k keys. We measured
+four ways with `partB/bench/design_bench.cpp` (one writer, 8 readers, same epoch scheme in all):
+
+1. **full copy** of the slot array: 211 us per put at 5k keys, 1.04 ms at 20k keys, so about 5 ms at
+   100k. Impossible at 50k puts/s. Rejected on data.
+2. **segment directory** (root of NSEG pointers, a put copies the root and one segment), with the
+   value either inline in a 64-byte slot or behind a pointer.
+3. **radix trie** with path copying (fan-out 16/32/64/256, leaf of 8/16/32 entries).
+
+Commands: `partB/bench/sweep.sh` on the server (takes about 25 minutes), `./syncer.sh pull`, then
+`python3 tools/summarize_design.py`. Data in `partB/results/design_sweep.txt`.
+
+What decided it: the segment directory is a little faster to read (12% to 18%) but its put cost grows
+with the table (3.3 us at 100k keys, 7.8 us at 1M, and the best NSEG changes with size). The trie put
+cost stays near 1 us at both sizes, uses about half the memory and loads 1M keys in 0.2 s instead of
+2.7 s. It is also what Part C wants for multi-key commits, because several writes in one commit can
+share one copied path. We chose the **64-way trie with 8 entries per leaf**. 32-way and 256-way were
+slower or bigger; leaf 16 and 32 were within noise of 8.
+
+Mistake worth knowing about: our first trie benchmark loaded 100k keys in 0.01 s, which looked too
+good, and we had never checked the benchmark actually returned correct data. We added a check that
+reads back every key after loading. All designs passed, so the speed was real.
+
+### 2.3 Reclamation: epoch vs hazard pointers, measured not guessed
+
+Epoch scheme: one cache-line slot per reader thread in a process-wide table; reader stores the
+global epoch with a full barrier (`exchange`), then loads `current_` once. Writer stamps retired
+objects with the epoch at the swap and frees a record only when its stamp is below the oldest
+announced epoch. Records are in publish order so freeing is oldest first.
+
+To justify the choice we built the same store with hazard pointers (`partB/bench/kvstore_hp.cpp`)
+and ran `partB/compare_schemes.sh` (3 interleaved runs per reader count). Reads were the same
+within noise (76.5M vs 77.2M at 8 readers). Reasons for epochs are therefore not speed: hazard
+pointers need a second load to validate the pointer (spec says exactly one load), and their usual
+advantage disappears because versions share most nodes, so any pinned reader blocks everything newer
+anyway. Part C snapshots also fit epochs naturally (a slot that stays announced).
+
+Bounded pass: `reclaim_pass()` runs at the end of each publish on the writer thread, frees at most
+`batch_` records, never waits (a pinned record just stays). `set_reclaim_batch(0)` disables it,
+which is what Part D.2's "no reclamation" reference uses. `reclaim_stats()` exposes counters.
+
+### 2.4 Verification, and what it caught
+
+- `make test`: unit test and the stress test (6 readers, writer doing put and erase on 5,000 keys
+  for 5 s; every row has a version and three derived words that the reader recomputes; also checks
+  per-key version never goes backwards). Result: 4.8M writes, 527M reads, 0 torn, 0 regressions.
+- `make check`: ASan+UBSan and TSan. **ASan caught a real bug**: `Version` was allocated with `new`
+  but freed with `free` from the retire list. Harmless on glibc, still wrong. Fixed by allocating
+  versions with `malloc`.
+- Negative control: `-DNOVA_BROKEN_RECLAIM` makes `min_active_epoch()` ignore readers. The stress test
+  under ASan then reports `heap-use-after-free` in `find` within seconds. So a pass means something.
+- TSan does not model `atomic_thread_fence`, so its clean result is weaker than the ASan control.
+- The hazard-pointer variant also passes the ASan stress test.
+
+### 2.5 First numbers (full tables come in Part D)
+
+`build/rcu --readers N`, pinned to CPUs 0 to 15, background writer at 50k puts/s, M reads/s:
+1 reader 14.7, 2 readers 23.3, 4 readers 46.2, 8 readers 76.5. Locks at 8 readers were 9.2
+(global) and 18.1 (rwlock). Tail latency p999 is 0.2 us for RCU against 5 to 7.7 us for the locks.
+One honest point: at 1 reader RCU (14.7M) is slower than the plain mutex (16.7M), because every
+read does the epoch announce (a locked instruction) and two more dependent loads through the trie.
+It wins by scaling, not by single-thread speed.
+
+### 2.6 Deliverable files
+
+`partB/{kvstore.h,kvstore.cpp,kvstore_test.cpp,stress_test.cpp,rcu.cpp,Makefile,README.md,PART_B_DIFF.patch}`
+plus the supporting `bench/` and `results/`. Diff made with
+`diff -u --label partA/kvstore.h --label partB/kvstore.h partA/kvstore.h partB/kvstore.h` (same for .cpp).

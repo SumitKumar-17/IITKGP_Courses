@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <malloc.h>
 #include <string>
 #include <thread>
 #include <vector>
@@ -133,14 +134,15 @@ struct DirSeg : Base {
     struct SlotP { long key; Val* val; };
     using Slot = typename std::conditional<Inline, SlotI, SlotP>::type;
     struct Seg { uint32_t cap, n; Slot s[]; };
-    struct Root { Seg* dir[]; };
+    struct Root { size_t n; Seg* dir[]; };
 
     size_t nseg, shift;
     std::atomic<Root*> cur;
 
     explicit DirSeg(size_t nseg_) : nseg(nseg_) {
         shift = 64 - __builtin_ctzll(nseg);
-        Root* r = (Root*)std::malloc(nseg * sizeof(Seg*));
+        Root* r = (Root*)std::malloc(sizeof(Root) + nseg * sizeof(Seg*));
+        r->n = nseg;
         for (size_t i = 0; i < nseg; i++) r->dir[i] = make_seg(8);
         cur = r;
     }
@@ -186,7 +188,8 @@ struct DirSeg : Base {
             if (exists) drop(s->val);
             Val* nv = (Val*)std::malloc(sizeof(Val) + len); nv->len = len; std::memcpy(nv->d, v, len); s->val = nv;
         }
-        Root* r = (Root*)std::malloc(nseg * sizeof(Seg*));
+        Root* r = (Root*)std::malloc(sizeof(Root) + nseg * sizeof(Seg*));
+        r->n = nseg;
         std::memcpy(r->dir, o->dir, nseg * sizeof(Seg*));
         r->dir[di] = g;
         cur.store(r, std::memory_order_seq_cst);
@@ -196,20 +199,27 @@ struct DirSeg : Base {
 };
 
 // --------------------------------------------------------------------- trie
-template <int FANBITS>
+// Radix trie over the hash. Inner nodes have 2^FANBITS children; a leaf keeps up
+// to LEAFMAX entries as a key array followed by value blocks, so a lookup scans
+// a few contiguous keys and then touches one value.
+template <int FANBITS, int LEAFMAX>
 struct Trie : Base {
     static constexpr int FAN = 1 << FANBITS;
-    static constexpr int LEAFMAX = 4;
-    struct Entry { long key; uint32_t len; char v[44]; };
-    struct Leaf { int n; Entry e[]; };
-    struct Node { uintptr_t c[FAN]; };           // low bit set: leaf; 0: empty
+    struct Val { uint32_t len; char d[44]; };
+    struct Leaf { uint32_t n, pad; long k[]; };   // k[n] keys, then n Vals
+    struct Node { uintptr_t c[FAN]; };            // low bit set: leaf; 0: empty
     std::atomic<uintptr_t> cur{0};
 
     static bool is_leaf(uintptr_t p) { return p & 1; }
     static Leaf* leaf(uintptr_t p) { return (Leaf*)(p & ~1ULL); }
     static uintptr_t tag(Leaf* l) { return (uintptr_t)l | 1; }
+    static Val* vals(Leaf* l) { return (Val*)(l->k + l->n); }
     static int chunk(uint64_t h, int depth) { return (h >> (64 - FANBITS * (depth + 1))) & (FAN - 1); }
     static constexpr int kMaxDepth = 64 / FANBITS - 1;
+    static Leaf* new_leaf(uint32_t n) {
+        Leaf* l = (Leaf*)std::malloc(sizeof(Leaf) + n * (sizeof(long) + sizeof(Val)));
+        l->n = n; return l;
+    }
 
     bool get(int tid, long k, void* out, size_t cap) {
         ep.enter(tid);
@@ -220,62 +230,60 @@ struct Trie : Base {
         bool ok = false;
         if (p) {
             Leaf* l = leaf(p);
-            for (int i = 0; i < l->n; i++) if (l->e[i].key == k) {
-                std::memcpy(out, l->e[i].v, l->e[i].len < cap ? l->e[i].len : cap); ok = true; break;
+            for (uint32_t i = 0; i < l->n; i++) if (l->k[i] == k) {
+                Val& v = vals(l)[i];
+                std::memcpy(out, v.d, v.len < cap ? v.len : cap); ok = true; break;
             }
         }
         ep.leave(tid);
         return ok;
     }
 
-    static Leaf* new_leaf(int n) { Leaf* l = (Leaf*)std::malloc(sizeof(Leaf) + n * sizeof(Entry)); l->n = 0; return l; }
-
-    // Returns the replacement for subtree p after inserting (k,v); records replaced nodes.
-    uintptr_t insert(uintptr_t p, uint64_t h, int d, long k, const void* v, size_t len) {
+    uintptr_t insert(uintptr_t p, uint64_t h, int d, long k, const Val& v) {
         if (!p || is_leaf(p)) {
             Leaf* ol = p ? leaf(p) : nullptr;
-            int on = ol ? ol->n : 0, at = -1;
-            for (int i = 0; i < on; i++) if (ol->e[i].key == k) at = i;
-            int nn = at >= 0 ? on : on + 1;
-            if (nn <= LEAFMAX || d >= kMaxDepth) {
+            uint32_t on = ol ? ol->n : 0;
+            int at = -1;
+            for (uint32_t i = 0; i < on; i++) if (ol->k[i] == k) at = i;
+            uint32_t nn = at >= 0 ? on : on + 1;
+            if (nn <= (uint32_t)LEAFMAX || d >= kMaxDepth) {
                 Leaf* l = new_leaf(nn);
-                for (int i = 0; i < on; i++) l->e[i] = ol->e[i];
-                l->n = nn;
-                int slot = at >= 0 ? at : on;
-                l->e[slot].key = k; l->e[slot].len = len; std::memcpy(l->e[slot].v, v, len);
+                for (uint32_t i = 0; i < on; i++) { l->k[i] = ol->k[i]; vals(l)[i] = vals(ol)[i]; }
+                uint32_t slot = at >= 0 ? at : on;
+                l->k[slot] = k; vals(l)[slot] = v;
                 drop(ol);
                 return tag(l);
             }
             Node* n = (Node*)std::calloc(1, sizeof(Node));
-            for (int i = 0; i < on; i++) {
-                int c = chunk(mix(ol->e[i].key), d);
-                uintptr_t sub = n->c[c];
-                n->c[c] = insert(sub, mix(ol->e[i].key), d + 1, ol->e[i].key, ol->e[i].v, ol->e[i].len);
+            for (uint32_t i = 0; i < on; i++) {
+                uint64_t hh = mix(ol->k[i]);
+                int c = chunk(hh, d);
+                n->c[c] = insert(n->c[c], hh, d + 1, ol->k[i], vals(ol)[i]);
             }
             drop(ol);
             int c = chunk(h, d);
-            n->c[c] = insert(n->c[c], h, d + 1, k, v, len);
+            n->c[c] = insert(n->c[c], h, d + 1, k, v);
             return (uintptr_t)n;
         }
         Node* o = (Node*)p;
         Node* n = (Node*)std::malloc(sizeof(Node));
         std::memcpy(n, o, sizeof(Node));
         int c = chunk(h, d);
-        n->c[c] = insert(o->c[c], h, d + 1, k, v, len);
+        n->c[c] = insert(o->c[c], h, d + 1, k, v);
         drop(o);
         return (uintptr_t)n;
     }
     void put(long k, const void* v, size_t len) {
         begin();
+        Val val; val.len = len; std::memcpy(val.d, v, len);
         uintptr_t o = cur.load(std::memory_order_relaxed);
-        uintptr_t n = insert(o, mix(k), 0, k, v, len);
-        cur.store(n, std::memory_order_seq_cst);
+        cur.store(insert(o, mix(k), 0, k, val), std::memory_order_seq_cst);
         finish();
     }
 };
 
 // ------------------------------------------------------------------- driver
-struct Result { double load_s, put_ns, mops, wrate; size_t peak, retired; };
+struct Result { double load_s, put_ns, mops, wrate; size_t peak, retired; double mb; };
 
 template <class S>
 Result run(S& s, size_t keys, long rate, int readers, double secs) {
@@ -283,6 +291,17 @@ Result run(S& s, size_t keys, long rate, int readers, double secs) {
     auto t0 = clk::now();
     for (size_t i = 0; i < keys; i++) { long k = (i / 100) * 100000 + i % 100; std::memcpy(v, &i, 8); s.put(k, v, 32); }
     double load = std::chrono::duration<double>(clk::now() - t0).count();
+    double mb = mallinfo2().uordblks / 1048576.0;
+    {
+        char chk[32];
+        for (size_t i = 0; i < keys; i++) {
+            long k = (i / 100) * 100000 + i % 100;
+            size_t got = ~0ULL;
+            if (!s.get(0, k, chk, 32)) { std::fprintf(stderr, "MISSING key %ld\n", k); std::exit(1); }
+            std::memcpy(&got, chk, 8);
+            if (got != i) { std::fprintf(stderr, "WRONG value for key %ld\n", k); std::exit(1); }
+        }
+    }
 
     std::atomic<bool> stop{false};
     std::vector<uint64_t> ops(readers, 0);
@@ -313,23 +332,27 @@ Result run(S& s, size_t keys, long rate, int readers, double secs) {
     stop = true;
     for (auto& t : th) t.join();
     uint64_t total = 0; for (auto o : ops) total += o;
-    return {load, (double)ptime / puts, total / secs / 1e6, puts / secs, s.peak, s.retired};
+    return {load, (double)ptime / puts, total / secs / 1e6, puts / secs, s.peak, s.retired, mb};
 }
+
+#define TRIE_CASE(F, L) if (param == F && leafmax == L) { Trie<F, L> s; r = run(s, keys, rate, 8, 3); }
 
 int main(int argc, char** argv) {
     std::string d = argc > 1 ? argv[1] : "dirseg-inline";
     int param = argc > 2 ? atoi(argv[2]) : 0;
     size_t keys = argc > 3 ? atol(argv[3]) : 100000;
     long rate = argc > 4 ? atol(argv[4]) : 50000;
+    int leafmax = argc > 5 ? atoi(argv[5]) : 4;
     Result r{};
     if (d == "full") { Full s; r = run(s, keys, rate, 8, 3); }
     else if (d == "dirseg-inline") { DirSeg<true> s(param); r = run(s, keys, rate, 8, 3); }
     else if (d == "dirseg-ptr") { DirSeg<false> s(param); r = run(s, keys, rate, 8, 3); }
     else if (d == "trie") {
-        if (param == 4) { Trie<4> s; r = run(s, keys, rate, 8, 3); }
-        else if (param == 5) { Trie<5> s; r = run(s, keys, rate, 8, 3); }
-        else { Trie<6> s; r = run(s, keys, rate, 8, 3); }
+        TRIE_CASE(4, 4) TRIE_CASE(5, 4) TRIE_CASE(6, 4)
+        TRIE_CASE(4, 8) TRIE_CASE(5, 8) TRIE_CASE(6, 8)
+        TRIE_CASE(4, 16) TRIE_CASE(5, 16) TRIE_CASE(6, 16)
+        TRIE_CASE(6, 32) TRIE_CASE(8, 16) TRIE_CASE(8, 32)
     }
-    std::printf("%-14s param=%-5d keys=%-7zu load=%6.2fs  put=%8.0f ns  writer=%8.0f/s  readers=%6.1f Mops/s  peak_retired=%zu\n",
-                d.c_str(), param, keys, r.load_s, r.put_ns, r.wrate, r.mops, r.peak);
+    std::printf("%-14s param=%-5d leaf=%-3d keys=%-8zu load=%6.2fs  put=%8.0f ns  writer=%8.0f/s  readers=%6.1f Mops/s  peak_retired=%zu  heap=%.1fMB\n",
+                d.c_str(), param, leafmax, keys, r.load_s, r.put_ns, r.wrate, r.mops, r.peak, r.mb);
 }
