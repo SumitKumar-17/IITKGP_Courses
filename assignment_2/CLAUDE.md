@@ -65,3 +65,12 @@ put(long,const void*,size_t), bool commit(). get copies value out (no pointers i
 - State plainly that no crash durability is provided in A to D.
 - Server: i9-13900K, 32 threads, perf 6.8, g++ 12.3, pandoc/xelatex present, no gnuplot,
   FlameGraph scripts not installed yet. perf_event_paranoid = -1.
+
+## Status
+- Part A: done (store, test, 3 drivers, profiling, layout bench, REPORT.md/pdf). Store is an
+  open-addressing table, 64-byte inline slots; NOVA_SYNC=0/1/2 picks none/mutex/shared_mutex.
+  Drivers take --readers N --seconds S --writer-rate R (default 50k puts/s). Benchmarks are
+  pinned with `taskset -c 0-15` (P-cores). Measured: single 19.3M rps, global_lock 16.8M->9.5M,
+  rwlock peaks 19.5M at 2 readers, 18.0M at 8. Kernel frames in flame graphs need
+  `sudo sysctl kernel.kptr_restrict=0` (set back to 1 afterwards).
+- Part B, C, D, E: not started.

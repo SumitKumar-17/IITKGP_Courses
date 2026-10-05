@@ -1,0 +1,1 @@
+global_lock/r8 ops=138275528 rps=12570503   p50=0.1    us p99=5.0    us p999=7.8    us
