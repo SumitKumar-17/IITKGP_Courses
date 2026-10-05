@@ -76,4 +76,6 @@ put(long,const void*,size_t), bool commit(). get copies value out (no pointers i
 - Part B: done (64-way path-copy trie, epoch reclamation, README, stress test). Store keeps
   Version{root,count}; global epoch table of 1024 slots; batch default 64; set_reclaim_batch(0)
   disables reclaim; reclaim_stats() exposes counters. Driver partB/rcu.cpp.
-- Part C, D, E: not started.
+- Part C: done (Transaction one-build-one-publish with first-committer-wins, index trie in Version,
+  Snapshot with lazy multi-store binding, keys(), join.h). Tests in partC/txn_test.cpp.
+- Part D, E: not started.

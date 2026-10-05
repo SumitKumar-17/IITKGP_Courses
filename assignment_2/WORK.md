@@ -281,3 +281,70 @@ It wins by scaling, not by single-thread speed.
 `partB/{kvstore.h,kvstore.cpp,kvstore_test.cpp,stress_test.cpp,rcu.cpp,Makefile,README.md,PART_B_DIFF.patch}`
 plus the supporting `bench/` and `results/`. Diff made with
 `diff -u --label partA/kvstore.h --label partB/kvstore.h partA/kvstore.h partB/kvstore.h` (same for .cpp).
+
+---
+
+## 3. Part C
+
+### 3.1 What the spec wants (short)
+
+C.1: a real `Transaction` (stage in `put`, publish all in `commit` with one pointer swap, drop on
+destruction), plus a design note on the isolation level, write skew and durability. C.2: a secondary
+index on a non-key field, a move-only `Snapshot` handle, `keys()`, and an index-nested-loop join that
+uses one snapshot for every call.
+
+### 3.2 Decisions and why
+
+- **Transaction = one build, one publish.** `commit()` runs every staged write through the same
+  path-copying code as a single `put`, in one build, then does one `current_` store. Nodes created by
+  the running build are unpublished, so later writes in the same commit modify them in place; that is
+  why a 16-key commit does not copy 16 whole paths. (Build ids are 64-bit so an old node can never be
+  mistaken for one of the current build.)
+- **Index = a second trie in the same Version.** That is what makes table and index atomic together.
+  We did not use posting lists (copying a 2,000-entry list per insert would be awful). One entry per
+  row, keyed by primary key, routed by the top 30 bits of a hash of the field, low bits from the key.
+  So all rows with one field value live under the same depth-5 node and a lookup is a descent plus a
+  subtree walk. Stored field bytes are compared, so a 30-bit hash collision is harmless.
+- **Snapshot owns its own epoch slot** (not the thread's cached one), so plain `get()` calls made
+  while holding it don't disturb the pin. Move-only; destructor releases the slot.
+- **One handle across two stores.** The workload has two separate `KVStore` objects but the spec
+  insists on exactly one handle. The handle binds lazily: first use on another store pins whatever
+  that store's current version is then. Safe because the epoch table is process-wide: anything current
+  after our announcement is retired at an epoch >= ours. Cost: the two stores are each fixed, but not
+  at the same instant. Said so in the README.
+- **First-committer-wins added late, on purpose.** First draft was blind writes. Writing the isolation
+  note we realised "snapshot isolation" needs a write-write check or it allows lost updates, so each
+  row got a 32-bit commit stamp (in the spare `pad` bytes of the 48-byte `Val`), a transaction records
+  a start sequence (its own creation time, or a Snapshot passed to the constructor), and commit
+  refuses if any key it writes has a newer stamp. Reads are not validated, which is exactly what
+  leaves write skew possible. Both behaviours have a test.
+
+### 3.3 Tests, with what each proves
+
+`make test` and `make check` in `partC/` (the second adds ASan, UBSan and TSan builds of every test).
+
+| test | evidence |
+|---|---|
+| atomicity | 1.9M to 2.3M 8-key commits, readers read all 8 through a snapshot, 0 torn |
+| atomicity control | same readers vs 8 separate `put()`s: about 30M torn snapshots, so the check can fail |
+| lost update | two transactions, same key: second `commit()` false, nothing visible |
+| write skew | doctors on call: both commit, 0 on call (this is SI, not serializable) |
+| isolation | one held snapshot, 105M reads, 1.3M concurrent commits and erases, 0 changes |
+| reclaim drain | after releasing, 23,063 writes drained a 1.4M-version backlog; no pass freed more than 64 |
+| index | index vs full scan inside one snapshot while writers run: 0 mismatches in 66k checks |
+| join | 41k joins against a writer rewriting instruments in one transaction: all consistent; re-running on a held snapshot gives the identical result hash |
+
+Gotchas met on the way:
+
+- The first isolation test failed because we expected a 1.4M-version backlog to drain after 2,000
+  writes. With batch 64 it cannot (2,000 x 64 = 128k). That is the bound working, not a bug; the test
+  now writes backlog/64 + 1000 times and also asserts no pass exceeded the batch.
+- A held snapshot is a memory cost, not a blocking one: 1.4M retired versions in 3 s of unthrottled
+  commits. Worth a sentence in Part D's COW discussion.
+- The test macro `CHECK(c, ...)` with an empty `__VA_ARGS__` produced hundreds of format warnings;
+  split into `CHECK` and `CHECKF`.
+
+### 3.4 Deliverable files
+
+`partC/{kvstore.h,kvstore.cpp,join.h,schema.h,kvstore_test.cpp,txn_test.cpp,stress_test.cpp,rcu.cpp,Makefile,README.md,PART_C_DIFF.patch}`.
+Diff made with `diff -u --label partB/kvstore.h --label partC/kvstore.h partB/kvstore.h partC/kvstore.h` (and .cpp).
