@@ -1,1 +1,1 @@
-global_lock/r2 ops=231317370 rps=21028852   p50=0.1    us p99=0.4    us p999=1.8    us
+global_lock/r2 ops=215269009 rps=19569910   p50=0.1    us p99=0.4    us p999=2.3    us

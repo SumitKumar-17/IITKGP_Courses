@@ -16,7 +16,7 @@ We picked this layout by measuring three tables single-threaded (`bench/table_be
 | open + heap pointer | 9.4 ns | 50.2 ns | 95 ns |
 | open + inline slot | 8.9 ns | 35.7 ns | 136 ns |
 
-The inline slot costs more to insert (larger slots, bigger memset on growth) but a hit touches a single cache line, which is what the readers do all day.
+**The inline slot wins gets at both sizes.** It costs more to insert (larger slots, bigger memset on growth) but a hit touches a single cache line, which is what the readers do all day.
 
 The three drivers use the same `kvstore.cpp`. Synchronisation is a compile-time choice (`-DNOVA_SYNC=0|1|2`): nothing, one `std::mutex` around every `put` and `get`, or a `std::shared_mutex` (shared for `get`, unique for `put`). Only the guard type changes. `workload_run` loads all the data before it starts the readers, so it never has a writer running during the read phase. The drivers therefore start their own background writer that waits for the load to finish and then overwrites random existing trades at 50,000 puts per second until the readers stop. `single_thread` has no writer and one reader.
 
@@ -24,43 +24,43 @@ There is no durability in this store or in Parts B to D. If the process dies, th
 
 ## 2. Results and where the lock versions lose time
 
-All runs are on an i9-13900K, pinned to CPUs 0 to 15 (the 8 performance cores with hyperthreads), 5 s of reads, mean of 3 runs. `single_thread` does 19.3M reads/s with one reader.
+All runs are on an i9-13900K, pinned to CPUs 0 to 15 (the 8 performance cores with hyperthreads), 5 s of reads, mean of 3 runs. `single_thread` does 19.4M reads/s with one reader. The server's CPU governor was set to `performance` for all runs (it made no difference to the global lock and lifted the rwlock by about 7%).
 
 | readers | global_lock rps | p99 / p999 (us) | rwlock rps | p99 / p999 (us) |
 |---|---|---|---|---|
-| 1 | 16.8M | 0.1 / 0.3 | 16.6M | 0.1 / 0.3 |
-| 2 | 12.4M | 0.5 / 1.9 | 19.5M | 0.2 / 1.0 |
-| 4 | 11.1M | 2.3 / 3.6 | 18.8M | 0.6 / 3.2 |
-| 8 | 9.5M | 4.9 / 7.5 | 18.0M | 3.8 / 5.0 |
+| 1 | 16.7M | 0.1 / 0.3 | 16.7M | 0.1 / 0.3 |
+| 2 | 12.0M | 0.6 / 1.9 | 19.2M | 0.2 / 1.1 |
+| 4 | 11.1M | 2.3 / 3.5 | 18.0M | 0.7 / 3.2 |
+| 8 | 9.2M | 5.0 / 7.7 | 18.1M | 3.8 / 5.0 |
 
-The global lock never scales: one reader is already its best, and 8 readers deliver 57% of that. The rwlock gains from 1 to 2 readers, peaks at 2 and then slides down slowly. Both are far above the 100,000 reads/s target in absolute terms. What the numbers say is that neither one turns extra cores into extra throughput.
+**The global lock never scales:** one reader is already its best, and 8 readers deliver 55% of that. **The rwlock stops scaling at 2 readers** (19.2M) and stays flat at about 18M from 4 to 8 readers. Both are far above the 100,000 reads/s target in absolute terms. **Neither lock turns extra cores into extra throughput.**
 
 We used `perf stat` attached to the running process for a 3 s window in the middle of the read phase (so the load and the final latency sort stay out of the counters) and `perf record` with DWARF unwinding on the same window. Kernel symbols needed `kptr_restrict=0` during these runs.
 
 | config | CPUs busy | IPC | L1 misses / 1k instr | ctx switches / s |
 |---|---|---|---|---|
-| global_lock r1 | 2.0 | 1.67 | 1.9 | 1.2k |
-| global_lock r8 | 8.3 | 0.55 | 4.6 | 413k |
-| rwlock r1 | 2.0 | 1.67 | 1.8 | 2.9k |
-| rwlock r8 | 6.9 | 0.38 | 6.9 | 447k |
+| global_lock r1 | 2.0 | 1.66 | 1.9 | 1.5k |
+| global_lock r8 | 8.3 | 0.57 | 4.5 | 447k |
+| rwlock r1 | 2.0 | 1.66 | 1.8 | 3.0k |
+| rwlock r8 | 6.9 | 0.38 | 7.0 | 446k |
 
 Samples grouped by the function they land in (leaf frame):
 
 | config | kernel lock wait | lock code in user space | clock reads | table lookup |
 |---|---|---|---|---|
-| global_lock r1 | 0.3% | 6.4% | 65.9% | 6.1% |
-| global_lock r4 | 14.2% | 29.2% | 31.0% | 2.0% |
-| global_lock r8 | 55.2% | 11.8% | 15.0% | 1.0% |
-| rwlock r4 | 2.7% | 45.1% | 28.8% | 4.3% |
-| rwlock r8 | 5.7% | 62.5% | 11.5% | 5.6% |
+| global_lock r1 | 0.4% | 6.2% | 66.2% | 6.0% |
+| global_lock r4 | 14.0% | 28.3% | 31.4% | 2.1% |
+| global_lock r8 | 56.3% | 10.8% | 14.9% | 1.1% |
+| rwlock r4 | 2.4% | 46.7% | 27.2% | 6.3% |
+| rwlock r8 | 5.8% | 63.6% | 10.6% | 6.1% |
 
 ![](results/profile/global_lock_r8.png){width=49%} ![](results/profile/rwlock_r8.png){width=49%}
 
 *Flame graphs at 8 readers: global_lock (left), rwlock (right). The other six are in `results/profile/`.*
 
-**The two locks lose time for different reasons.** In `global_lock` the dominant cost is waiting. At 8 readers 55% of the samples are in the kernel's futex path (`native_queued_spin_lock_slowpath`, `futex_wait`, `futex_wake`, `lll_lock_wait`), with 413k context switches per second. Threads really sleep and wake up. The flame graph shows the same thing as two tall towers rising out of `std::mutex::lock` and `unlock`. In `rwlock` almost nothing sleeps: only 5.7% of samples are in the kernel. Instead 62% of the time is inside `pthread_rwlock_rdlock` and `rdunlock`, which are user-space atomic increments and decrements on one reader counter. That counter lives in one cache line that every core has to take from every other core on each call. We can see this in the counters: IPC drops from 1.67 to 0.38 and L1 misses per thousand instructions go from 1.8 to 6.9, while the last-level cache miss rate stays flat at about 0.03 per thousand instructions. The lines move between cores' private caches and never go to memory. So for the rwlock it is cache-line bouncing, and for the plain mutex it is lock acquisition (waiting). The headline `cache-miss %` is misleading here because its denominator, cache references, grows with the thread count, which is why we report misses per instruction.
+**The two locks lose time for different reasons.** In `global_lock` the dominant cost is **waiting for the lock**. At 8 readers **56% of the samples are in the kernel's futex path** (`native_queued_spin_lock_slowpath`, `futex_wait`, `futex_wake`, `lll_lock_wait`), with 447k context switches per second. Threads really sleep and wake up. The flame graph shows the same thing as two tall towers rising out of `std::mutex::lock` and `unlock`. In `rwlock` almost nothing sleeps: only 5.8% of samples are in the kernel. Instead **64% of the time is inside** `pthread_rwlock_rdlock` and `rdunlock`, which are user-space atomic increments and decrements on one reader counter. That counter lives in one cache line that every core has to take from every other core on each call. We can see this in the counters: IPC drops from 1.66 to 0.38 and L1 misses per thousand instructions go from 1.8 to 7.0, while the last-level cache miss rate stays flat at about 0.03 per thousand instructions. The lines move between cores' private caches and never go to memory. **So for the rwlock the loss is cache-line bouncing, and for the plain mutex it is lock acquisition (waiting).** The headline `cache-miss %` is misleading here because its denominator, cache references, grows with the thread count, which is why we report misses per instruction.
 
-A caveat on reading the flame graphs: 12% to 66% of samples are in `clock_gettime` (vdso) and the latency vector, because the generator times every call. That overhead is the same for every store we build, but it does mean the lock share above understates how much of the *store's own* time the lock takes.
+A caveat on reading the flame graphs: 11% to 66% of samples are in `clock_gettime` (vdso) and the latency vector, because the generator times every call. That overhead is the same for every store we build, but it does mean the lock share above understates how much of the *store's own* time the lock takes.
 
 ## 3. Design note: record layout
 

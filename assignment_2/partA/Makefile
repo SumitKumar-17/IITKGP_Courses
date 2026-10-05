@@ -24,7 +24,14 @@ $(BUILD)/rwlock: rwlock.cpp kvstore.cpp kvstore.h $(COMMON) | $(BUILD)
 test: $(BUILD)/kvstore_test
 	$(BUILD)/kvstore_test
 
+check: | $(BUILD)
+	for s in 0 1 2; do \
+	  $(CXX) -std=c++17 -O1 -g -fsanitize=address,undefined -DNOVA_SYNC=$$s kvstore_test.cpp kvstore.cpp -o $(BUILD)/san_test$$s && $(BUILD)/san_test$$s || exit 1; \
+	done
+	$(CXX) $(CXXFLAGS) -O1 -fsanitize=thread -DNOVA_SYNC=2 rwlock.cpp kvstore.cpp $(COMMON) -o $(BUILD)/tsan_rwlock
+	$(BUILD)/tsan_rwlock --readers 4 --seconds 2 --writer-rate 20000
+
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all test clean
+.PHONY: all test check clean
