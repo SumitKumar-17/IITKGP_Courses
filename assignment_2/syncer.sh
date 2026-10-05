@@ -23,7 +23,7 @@ push() {
 pull() {
   for d in part?/results; do
     mkdir -p "$d"
-    rsync -az -e "$SSH" "$SERVER:$REMOTE/$d/" "$d/"
+    rsync -az -e "$SSH" "$SERVER:$REMOTE/$d/" "$d/" || true
   done
 }
 
