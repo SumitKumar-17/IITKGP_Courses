@@ -2,7 +2,7 @@ CXX      ?= g++
 CXXFLAGS := -std=c++17 -O2 -g -fno-omit-frame-pointer -pthread -Wall -Wextra -I../common
 BUILD    := build
 
-all: $(BUILD)/bench_rcu $(BUILD)/bench_rwlock $(BUILD)/bench_global $(BUILD)/bench_single
+all: $(BUILD)/bench_rcu $(BUILD)/bench_rwlock $(BUILD)/bench_global $(BUILD)/bench_single $(BUILD)/bench_wal $(BUILD)/replay_bench
 
 $(BUILD):
 	mkdir -p $(BUILD)
@@ -20,6 +20,13 @@ $(BUILD)/bench_global: bench.cpp ../partA/kvstore.cpp ../partA/kvstore.h | $(BUI
 
 $(BUILD)/bench_single: bench.cpp ../partA/kvstore.cpp ../partA/kvstore.h | $(BUILD)
 	$(CXX) $(CXXFLAGS) -I../partA -DNOVA_SYNC=0 bench.cpp ../partA/kvstore.cpp -o $@
+
+# The Part E store with the write-ahead log.
+$(BUILD)/bench_wal: bench.cpp ../partE/kvstore.cpp ../partE/wal.cpp ../partE/kvstore.h ../partE/wal.h ../partE/join.h | $(BUILD)
+	$(CXX) $(CXXFLAGS) -msse4.2 -I../partE -DHAVE_RCU -DHAVE_WAL bench.cpp ../partE/kvstore.cpp ../partE/wal.cpp -o $@
+
+$(BUILD)/replay_bench: replay_bench.cpp ../partE/kvstore.cpp ../partE/wal.cpp ../partE/kvstore.h ../partE/wal.h | $(BUILD)
+	$(CXX) $(CXXFLAGS) -msse4.2 -I../partE replay_bench.cpp ../partE/kvstore.cpp ../partE/wal.cpp -o $@
 
 clean:
 	rm -rf $(BUILD)

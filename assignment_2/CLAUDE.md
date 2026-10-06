@@ -67,15 +67,16 @@ put(long,const void*,size_t), bool commit(). get copies value out (no pointers i
   FlameGraph scripts not installed yet. perf_event_paranoid = -1.
 
 ## Status
-- Parts A to D done and measured; Part E (bonus WAL) not started.
-- A: open-addressing table, 64-byte inline slots, NOVA_SYNC=0/1/2. Report partA/REPORT.md (4 pp).
+- All parts A to E done and measured. Reports: partA/REPORT.pdf (4 pp), partD/REPORT.pdf (7 pp);
+  design notes: partB/README.md, partC/README.md, partE/README.md. verification.txt = clean-unzip check.
+- A: open-addressing table, 64-byte inline slots, NOVA_SYNC=0/1/2.
 - B: 64-way path-copy trie, epoch reclamation, set_reclaim_batch (0 disables), reclaim_stats().
-- C: Transaction (one build, one publish, first-committer-wins), index trie in Version, Snapshot
-  (lazy multi-store binding), keys(), join.h, reclaim_all().
-- D: partD/REPORT.md (7 pp), bench.cpp harness, scripts d1/d1b/d2/d3.
-- **Benchmark layout trap**: store objects must be 64-byte aligned with the lock / version pointer on
-  its own cache line; results used to swing 3x with environment size. tools/envsweep.sh and
-  tools/layout_sensitivity.sh prove it. The provided generator also has false sharing between its
-  per-thread vectors (partD/experiments/padded_generator.sh).
-- Server was changed for measuring (performance governor, C2/C3 off, kptr_restrict=0). Restore with
+- C: Transaction (one build, one publish, first-committer-wins), index trie in Version, Snapshot with
+  lazy multi-store binding, keys(), join.h, reclaim_all().
+- D: bench.cpp harness, d1/d1b/d2/d3/hist_extra scripts, partD/REPORT.md.
+- E: wal.h/wal.cpp (CRC32C records, LSN, replay, group commit), open_wal(); levels Async/Write/Sync.
+- **Benchmark layout trap**: stores are 64-byte aligned, lock / version pointer on its own line
+  (tools/envsweep.sh, tools/layout_sensitivity.sh). The provided generator also has false sharing
+  (partD/experiments/padded_generator.sh). The disk's fdatasync latency drifts (probe it).
+- Server was changed for measuring (governor performance, C2/C3 off, kptr_restrict=0) and has been RESTORED. To re-measure, redo the changes, then restore with
   tools/restore_server.sh. WORK.md (not submitted) has the whole story.

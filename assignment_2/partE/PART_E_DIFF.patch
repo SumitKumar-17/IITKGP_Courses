@@ -1,0 +1,252 @@
+--- partC/kvstore.h
++++ partE/kvstore.h
+@@ -1,4 +1,4 @@
+-// kvstore.h (Part C)
++// kvstore.h (Part E)
+ //
+ // Same RCU store as Part B, extended with
+ //   * Transaction: staged writes published as ONE new version,
+@@ -14,9 +14,13 @@
+ #include <atomic>
+ #include <cstddef>
+ #include <cstdint>
++#include <memory>
+ #include <mutex>
++#include <string>
+ #include <vector>
+ 
++#include "wal.h"
++
+ namespace nova_detail { struct EpochSlot; }
+ 
+ struct StagedWrite {
+@@ -53,6 +57,14 @@
+     // bounded pass. Returns how many versions it freed.
+     size_t reclaim_all();
+ 
++    // Turns on the write-ahead log. An existing log is replayed into the store first
++    // (so call this on an empty store), then every commit is logged before it is
++    // published. Returns false and fills *error if the log cannot be used. Reads
++    // never touch the log.
++    bool open_wal(const std::string& path, const WalOptions& options = WalOptions(),
++                  WalReplayInfo* replay = nullptr, std::string* error = nullptr);
++    WalStats wal_stats() const;
++
+     size_t size() const;
+ 
+     // Builds a hash index over the bytes [field_offset, field_offset + field_len)
+@@ -106,6 +118,7 @@
+     const Version* bound(const Snapshot& snap) const;
+     void apply_put(Build& b, long key, const void* value, size_t len);
+     void apply_erase(Build& b, long key);
++    void build_index(Build& b, size_t field_offset, size_t field_len);
+     bool commit_writes(const std::vector<StagedWrite>& writes, const std::vector<char>& data,
+                        uint64_t start_seq);
+     void publish(Version* old, const Build& b);
+@@ -130,6 +143,7 @@
+     bool has_index_ = false;
+ 
+     std::atomic<uint64_t> commit_seq_{0};   // sequence number of the newest published version
++    std::unique_ptr<Wal> wal_;              // null until open_wal()
+ 
+     std::atomic<int> batch_;
+     std::atomic<uint64_t> retired_{0}, freed_{0}, backlog_peak_{0};
+--- partC/kvstore.cpp
++++ partE/kvstore.cpp
+@@ -1,4 +1,4 @@
+-// kvstore.cpp (Part C)
++// kvstore.cpp (Part E)
+ #include "kvstore.h"
+ 
+ #include <chrono>
+@@ -600,57 +600,84 @@
+ 
+ bool KVStore::put(long key, const void* value, size_t value_len) {
+     if (value_len > UINT32_MAX) return false;
+-    std::lock_guard<std::mutex> g(write_mu_);
+-    Version* old = current_.load(std::memory_order_relaxed);
+-    Build b(old, ++build_seq_, pending_);
+-    try { apply_put(b, key, value, value_len); } catch (const std::bad_alloc&) { return false; }
+-    publish(old, b);
++    uint64_t lsn = 0;
++    {
++        std::lock_guard<std::mutex> g(write_mu_);
++        if (wal_ && wal_->failed()) return false;
++        Version* old = current_.load(std::memory_order_relaxed);
++        Build b(old, ++build_seq_, pending_);
++        try { apply_put(b, key, value, value_len); } catch (const std::bad_alloc&) { return false; }
++        if (wal_) {
++            WalOp op{1, key, value, value_len};
++            lsn = wal_->append(&op, 1);
++            if (!lsn) { pending_.clear(); return false; }   // log failed: nothing is published
++        }
++        publish(old, b);
++    }
++    if (wal_) wal_->wait_durable(lsn);
+     return true;
+ }
+ 
+ bool KVStore::erase(long key) {
+-    std::lock_guard<std::mutex> g(write_mu_);
+-    Version* old = current_.load(std::memory_order_relaxed);
+-    if (!find(old->root, key)) return false;
+-    Build b(old, ++build_seq_, pending_);
+-    apply_erase(b, key);
+-    publish(old, b);
++    uint64_t lsn = 0;
++    {
++        std::lock_guard<std::mutex> g(write_mu_);
++        if (wal_ && wal_->failed()) return false;
++        Version* old = current_.load(std::memory_order_relaxed);
++        if (!find(old->root, key)) return false;
++        Build b(old, ++build_seq_, pending_);
++        apply_erase(b, key);
++        if (wal_) {
++            WalOp op{2, key, nullptr, 0};
++            lsn = wal_->append(&op, 1);
++            if (!lsn) { pending_.clear(); return false; }
++        }
++        publish(old, b);
++    }
++    if (wal_) wal_->wait_durable(lsn);
+     return true;
+ }
+ 
+ bool KVStore::commit_writes(const std::vector<StagedWrite>& writes, const std::vector<char>& data,
+                             uint64_t start_seq) {
+     if (writes.empty()) return true;
+-    std::lock_guard<std::mutex> g(write_mu_);
+-    Version* old = current_.load(std::memory_order_relaxed);
+-
+-    // First committer wins: a row stamped after our start was written by a
+-    // transaction that committed first. The difference is taken in 32 bits so
+-    // the stamp may wrap.
+-    for (const StagedWrite& w : writes) {
+-        const Val* cur = find(old->root, w.key);
+-        if (cur && static_cast<int32_t>(cur->pad - static_cast<uint32_t>(start_seq)) > 0) return false;
+-    }
++    uint64_t lsn = 0;
++    {
++        std::lock_guard<std::mutex> g(write_mu_);
++        if (wal_ && wal_->failed()) return false;
++        Version* old = current_.load(std::memory_order_relaxed);
++
++        // First committer wins: a row stamped after our start was written by a
++        // transaction that committed first. The difference is taken in 32 bits so
++        // the stamp may wrap.
++        for (const StagedWrite& w : writes) {
++            const Val* cur = find(old->root, w.key);
++            if (cur && static_cast<int32_t>(cur->pad - static_cast<uint32_t>(start_seq)) > 0) return false;
++        }
+ 
+-    Build b(old, ++build_seq_, pending_);
+-    try {
+-        for (const StagedWrite& w : writes) apply_put(b, w.key, data.data() + w.offset, w.len);
+-    } catch (const std::bad_alloc&) {
+-        return false;
++        Build b(old, ++build_seq_, pending_);
++        try {
++            for (const StagedWrite& w : writes) apply_put(b, w.key, data.data() + w.offset, w.len);
++        } catch (const std::bad_alloc&) {
++            return false;
++        }
++        if (wal_) {
++            std::vector<WalOp> ops;
++            ops.reserve(writes.size());
++            for (const StagedWrite& w : writes) ops.push_back({1, w.key, data.data() + w.offset, w.len});
++            lsn = wal_->append(ops.data(), ops.size());
++            if (!lsn) { pending_.clear(); return false; }
++        }
++        publish(old, b);
+     }
+-    publish(old, b);
++    if (wal_) wal_->wait_durable(lsn);
+     return true;
+ }
+ 
+-bool KVStore::create_index(size_t field_offset, size_t field_len) {
+-    if (field_len == 0 || field_len > kInline) return false;
+-    std::lock_guard<std::mutex> g(write_mu_);
+-    if (has_index_) return false;
+-    Version* old = current_.load(std::memory_order_relaxed);
+-    Build b(old, ++build_seq_, pending_);
++void KVStore::build_index(Build& b, size_t field_offset, size_t field_len) {
+     index_off_ = field_offset;
+     index_len_.store(field_len, std::memory_order_relaxed);
+-    for_each_entry(old->root, [&](long key, const Val& v) {
++    for_each_entry(b.root, [&](long key, const Val& v) {
+         if (v.len < field_offset + field_len) return;
+         Val fv;
+         fv.len = static_cast<uint32_t>(field_len);
+@@ -660,10 +687,70 @@
+         b.iroot = insert(b.iroot, route(Kind::Index, key, fv), 0, key, fv, b.ic, dummy);
+     });
+     has_index_ = true;
+-    publish(old, b);
++}
++
++bool KVStore::create_index(size_t field_offset, size_t field_len) {
++    if (field_len == 0 || field_len > kInline) return false;
++    uint64_t lsn = 0;
++    {
++        std::lock_guard<std::mutex> g(write_mu_);
++        if (has_index_) return false;
++        if (wal_ && wal_->failed()) return false;
++        Version* old = current_.load(std::memory_order_relaxed);
++        Build b(old, ++build_seq_, pending_);
++        build_index(b, field_offset, field_len);
++        if (wal_) {
++            WalOp op{3, static_cast<long>(field_offset), nullptr, field_len};
++            lsn = wal_->append(&op, 1);
++            if (!lsn) { pending_.clear(); return false; }
++        }
++        publish(old, b);
++    }
++    if (wal_) wal_->wait_durable(lsn);
++    return true;
++}
++
++bool KVStore::open_wal(const std::string& path, const WalOptions& options, WalReplayInfo* replay,
++                       std::string* error) {
++    std::lock_guard<std::mutex> g(write_mu_);
++    std::string err;
++    if (wal_) {
++        if (error) *error = "a log is already open";
++        return false;
++    }
++    Version* old = current_.load(std::memory_order_relaxed);
++    Build b(old, ++build_seq_, pending_);
++
++    // Replay builds one new version out of every record, then publishes it once.
++    auto apply = [&](const WalOp* ops, size_t n) {
++        for (size_t i = 0; i < n; i++) {
++            if (ops[i].type == 1) apply_put(b, ops[i].key, ops[i].value, ops[i].len);
++            else if (ops[i].type == 2) apply_erase(b, ops[i].key);
++            else if (!has_index_) build_index(b, static_cast<size_t>(ops[i].key), ops[i].len);
++        }
++    };
++    WalReplayInfo info;
++    std::unique_ptr<Wal> w;
++    try {
++        w = Wal::open(path, options, apply, info, err);
++    } catch (const std::bad_alloc&) {
++        err = "out of memory while replaying the log";
++    }
++    if (replay) *replay = info;
++    if (!w) {
++        pending_.clear();
++        if (error) *error = err;
++        return false;
++    }
++    if (info.records > 0) publish(old, b); else pending_.clear();
++    wal_ = std::move(w);
+     return true;
+ }
+ 
++WalStats KVStore::wal_stats() const {
++    return wal_ ? wal_->stats() : WalStats{};
++}
++
+ // One atomic store makes the new version visible. The replaced objects are
+ // stamped with the epoch of the swap; a reader that could still hold the old
+ // version announced an epoch no later than that stamp.

@@ -30,15 +30,15 @@ test: $(BUILD)/kvstore_test $(BUILD)/stress_test $(BUILD)/txn_test
 # Memory errors and data races. Both would show up as use-after-free or a
 # torn row if reclamation freed something a reader still held.
 check: | $(BUILD)
-	$(CXX) -std=c++17 -O1 -g -pthread -fsanitize=address,undefined kvstore_test.cpp kvstore.cpp -o $(BUILD)/san_test
+	$(CXX) -std=c++17 -O1 -g -pthread -I. -I../common -fsanitize=address,undefined kvstore_test.cpp kvstore.cpp -o $(BUILD)/san_test
 	$(BUILD)/san_test
-	$(CXX) -std=c++17 -O1 -g -pthread -fsanitize=address,undefined stress_test.cpp kvstore.cpp -o $(BUILD)/asan_stress
+	$(CXX) -std=c++17 -O1 -g -pthread -I. -I../common -fsanitize=address,undefined stress_test.cpp kvstore.cpp -o $(BUILD)/asan_stress
 	$(BUILD)/asan_stress 6 5 8
-	$(CXX) -std=c++17 -O1 -g -pthread -fsanitize=thread stress_test.cpp kvstore.cpp -o $(BUILD)/tsan_stress
+	$(CXX) -std=c++17 -O1 -g -pthread -I. -I../common -fsanitize=thread stress_test.cpp kvstore.cpp -o $(BUILD)/tsan_stress
 	$(BUILD)/tsan_stress 4 5 8
-	$(CXX) -std=c++17 -O1 -g -pthread -fsanitize=address,undefined txn_test.cpp kvstore.cpp -o $(BUILD)/asan_txn
+	$(CXX) -std=c++17 -O1 -g -pthread -I. -I../common -fsanitize=address,undefined txn_test.cpp kvstore.cpp -o $(BUILD)/asan_txn
 	$(BUILD)/asan_txn 3
-	$(CXX) -std=c++17 -O1 -g -pthread -fsanitize=thread txn_test.cpp kvstore.cpp -o $(BUILD)/tsan_txn
+	$(CXX) -std=c++17 -O1 -g -pthread -I. -I../common -fsanitize=thread txn_test.cpp kvstore.cpp -o $(BUILD)/tsan_txn
 	$(BUILD)/tsan_txn 3
 
 clean:

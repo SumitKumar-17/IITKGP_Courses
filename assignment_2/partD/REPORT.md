@@ -44,11 +44,12 @@ The first table is the provided generator, default parameters. `single_thread` c
 | | 4 | 42.2 | 0.034 | 0.089 | 0.217 | 36.7, 42.2, 43.6 |
 | | 8 | **75.2** | 0.037 | 0.143 | 0.263 | 75.2, 73.6, 78.1 |
 
-The same stores in the histogram harness (single-thread has no writer; the others have the 50,000 puts/s writer). The RCU store here is the Part C one, the final store:
+The same stores in the histogram harness (single-thread has no writer; the others have the 50,000 puts/s writer). The extra single-thread row is the faithful "single thread with a background writer": one thread serves the reads and also performs the 50,000 puts/s itself, as a single-threaded server would. It reaches 19.9M reads/s against 21.6M without writes, and the puts show up in the tail (p999 of 992 ns against 63 ns). The RCU store here is the Part C one, the final store:
 
 | store | readers | reads/s (M) | p50 (ns) | p99 (ns) | p999 (ns) | longest call (us) |
 |---|---|---|---|---|---|---|
 | single_thread, no writer | 1 / 8 | 21.6 / 166.8 | 18 | 47 | 63 | 16 / 221 |
+| single_thread, one thread doing the reads **and** 50,000 puts/s | 1 | 19.9 | 27 | 70 | 992 | 35 |
 | global_lock | 1 | 19.1 | 23 | 53 | 256 | 17 |
 | | 2 | 23.2 | 50 | 348 | 592 | 111 |
 | | 4 | 19.6 | 85 | 1,344 | 2,720 | 362 |
@@ -163,4 +164,4 @@ COW helps little or hurts when **a single write touches a large fraction of the 
 
 ## Raw data
 
-`results/d1.csv` (generator), `results/d1b.txt` (harness), `results/d1_time.txt` (CPU time and context switches of each D.1 run), `results/d2.txt` and `results/hist/*.csv` (latency histograms), `results/d3.txt`, `results/profile/` (perf stat, folded stacks and flame graphs for RCU at 1 and 8 readers), `results/padded_generator.txt`, `results/envsweep.txt`, `results/quiet.log` (the idle-CPU check before each group). Scripts: `d1.sh`, `d1b.sh`, `d2.sh`, `d3.sh`, `profile_rcu.sh`, `bench.cpp`; summaries by `tools/summarize_d.py`, charts by `tools/make_charts.py`.
+`results/d1.csv` (generator), `results/d1b.txt` (harness), `results/d1_single_inline.txt` (single thread with its own writer), `results/d1_time.txt` (CPU time and context switches of each D.1 run), `results/d2.txt` and `results/hist/*.csv` (latency histograms: `d1_*` for D.1 at 8 readers, `bursty_*` for D.2, `d3_join1000_*` for the D.3 joins; each row is a bucket's lower bound in ns and its count), `results/d3.txt`, `results/profile/` (perf stat, folded stacks and flame graphs for RCU at 1 and 8 readers), `results/padded_generator.txt`, `results/envsweep.txt`, `results/quiet.log` (the idle-CPU check before each group). Scripts: `d1.sh`, `d1b.sh`, `d2.sh`, `d3.sh`, `profile_rcu.sh`, `bench.cpp`; summaries by `tools/summarize_d.py`, charts by `tools/make_charts.py`.

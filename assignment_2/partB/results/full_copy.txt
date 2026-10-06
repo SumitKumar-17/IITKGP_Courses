@@ -1,0 +1,4 @@
+full           param=0     leaf=4   keys=2000     load=  0.03s  put=   48728 ns  writer=   20495/s  readers= 664.2 Mops/s  peak_retired=4  heap=0.3MB
+full           param=0     leaf=4   keys=5000     load=  0.32s  put=  231923 ns  writer=    4310/s  readers= 609.9 Mops/s  peak_retired=2  heap=1.1MB
+full           param=0     leaf=4   keys=10000    load=  1.46s  put=  509489 ns  writer=    1963/s  readers= 604.6 Mops/s  peak_retired=2  heap=2.1MB
+full           param=0     leaf=4   keys=20000    load=  6.34s  put= 1062009 ns  writer=     942/s  readers= 613.1 Mops/s  peak_retired=2  heap=4.1MB

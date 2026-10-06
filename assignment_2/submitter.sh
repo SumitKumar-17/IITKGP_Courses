@@ -38,6 +38,7 @@ done
 mkdir -p "$STAGE/tools"
 cp tools/*.py tools/*.sh tools/*.c "$STAGE/tools/"
 cp assignment_2.pdf "$STAGE/" 2>/dev/null || true
+[ -f verification.txt ] && cp verification.txt "$STAGE/" || true
 
 cat > "$STAGE/INDEX.md" <<'EOF'
 # NOVA-KV, Assignment 2: layout of this submission
@@ -51,9 +52,11 @@ Sumit Kumar (22CS30056), Jatin Mahawar (22CS30032)
 | `partB/` | RCU store, stress test, design and reclamation benchmarks. **`README.md`**, `PART_B_DIFF.patch` |
 | `partC/` | transactions, index, snapshots, join. **`README.md`** (both design notes), `PART_C_DIFF.patch` |
 | `partD/` | benchmark harness, scripts, all raw data. **`REPORT.pdf`** |
+| `partE/` | (bonus) write-ahead log, its tests, crash test and benchmarks. **`README.md`**, `PART_E_DIFF.patch` |
 | `tools/` | summaries, charts, environment and layout checks, the idle-CPU check |
 
-Build and test a part: `make -C partA test` (and `check` for the sanitizer builds), same for `partB`, `partC`.
+Build and test a part: `make -C partA test` (and `check` for the sanitizer builds), same for `partB`, `partC`, `partE`.
+`tools/verify_all.sh` does all of that for every part from scratch; `verification.txt` is its log from before submission.
 Each part keeps its own `kvstore.h` / `kvstore.cpp`, so the diffs between parts are real files.
 Everything was built and measured with `g++ -std=c++17` on a 32-thread Intel i9-13900K, pinned to
 logical CPUs 0 to 15. The store has no durability in any of these parts: if the process dies the data is gone.

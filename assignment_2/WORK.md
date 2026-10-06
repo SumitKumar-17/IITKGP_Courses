@@ -471,7 +471,81 @@ charts `python3 tools/make_charts.py`. Reports: `tools/pdf.sh partD/REPORT.md`.
   before the PDF was built; about ten wording errors were found that way (a profile row that counted
   one thing twice, ratios taken against the wrong baseline, a hypothesis stated as fact).
 
-### 4.6 Server state to restore when you are done
+### 4.6 Server state (restored at the end of the project)
 
-`tools/restore_server.sh` (needs the sudo password): governor back to `powersave`, energy preference
+The measurements are finished and `tools/restore_server.sh` has been run: governor back to `powersave`, energy preference
 to `balance_performance`, deep idle states on, `kptr_restrict=1`.
+
+---
+
+## 5. Part E (the bonus: a write-ahead log)
+
+### 5.1 What the spec wants (short)
+
+Append every committed transaction to an on-disk log before or as part of its RCU publish; a restarted
+process replays the log. No per-read overhead. Justify where the fsync goes and how writes are batched
+(group commit). Deliverable: the WAL and its diff, a short note on the fsync/group-commit policy and its
+throughput cost (re-run D.1's write-side numbers with and without it), half a page on what is still
+missing for a real desk.
+
+### 5.2 Design decisions and why
+
+- **Separate `wal.h/wal.cpp`, called from the commit paths.** The store changes only where it commits:
+  build the version, `append` the record, publish, release the lock, `wait_durable`. `get`, `index_get`
+  and the snapshot `get` are byte-identical to Part C (we `diff` the function bodies; it is in the README).
+- **Log before publish, wait after unlock.** Log order then equals publish order, and the wait happens
+  outside the writer lock so other commits can join the same sync. We did *not* hold publication until
+  the sync finished: that would serialise commits behind a 0.2 to 1.5 ms fdatasync or delay readers by
+  that long. The price (stated in the README): a reader can see a commit that a power cut then loses.
+- **Three levels instead of one policy**, because the right answer depends on what "survives" means:
+  Async (buffered, background flush), Write (`write()` per commit, survives `kill -9`), Sync (fdatasync,
+  survives power loss, group commit by leader/follower). Recommended for the feed: Write with a 1 ms
+  background fdatasync.
+- **`fdatasync` on a preallocated file** (so appends do not change the size metadata). Probe on this
+  disk: 231 us fdatasync vs 280 us fsync.
+- **Record = header + CRC32C + log sequence number.** Replay stops at the first record whose magic,
+  length, checksum, sequence number or contents is wrong. Zeros mean end of log (preallocation). New
+  files get their directory entry fsynced. A failed write or fsync puts the log in a failed state and
+  we never retry.
+- **Torn tail vs damage in the middle.** First version silently dropped everything after any bad
+  record. Thinking about "what would a real desk do" showed that is wrong for bit rot in the middle:
+  it throws away acknowledged commits without saying so. Replay now also scans past the damage and
+  reports how many valid records it dropped (`records_after_damage`): zero means a torn tail (normal
+  after a crash), above zero means corruption. Tests check both cases. We still only detect, not repair.
+
+### 5.3 Tests (all in `partE/`, `make test` and `make check`)
+
+- `wal_test`: round trips at every level against an oracle; the file cut at every byte of its last 3
+  records plus 150 random places (877 cuts); 600 random bit flips; a record removed and a record repeated
+  (caught by sequence numbers); recovery from a torn tail then more appends; 8-thread group commit.
+- `crash_test`: fork a child that commits flat out, `SIGKILL` it at a random moment, recover in the parent,
+  repeat 40 times per level on the same log. Write and Sync lose no acknowledged commit; Async loses up
+  to a few thousand (the flush window); transactions always come back whole.
+- ASan/UBSan on all of it, TSan on `wal_test`. Not testable here: a real power cut (the README says so).
+
+### 5.4 Things that went wrong on the way
+
+- **The first Part E benchmark failed instantly** because the output directory did not exist on the
+  server; the "finished" watcher fired immediately. (Third time this has happened. `mkdir -p` before
+  redirecting.)
+- **Real bug found by the smoke test:** the background fdatasync held the file mutex, so every commit's
+  `write()` waited behind it; Write-level p99 was 417 us and the worst case 7.8 ms. fdatasync does not need
+  that lock. Fixed; p99 became 3.9 us and the worst case 131 us.
+- **A packaging bug found by the new part:** Part C's `make check` rules had no include path for
+  `schema.h` (moved to `common/` earlier). It had only worked on the server because a stale copy of the
+  file was still there (our sync never deletes). Fixed in both Makefiles, stale file removed, and a
+  clean-unzip check added (`tools/verify_all.sh`).
+- **The disk is not a constant.** Identical Sync runs gave about 220 us per sync in one stretch and about
+  1.5 ms in another (medians of three mixed the two). The sweep now flushes and pauses before each run,
+  records a quick fdatasync probe, and prints each run's own average sync latency; group commit is judged
+  by commits per sync, which does not depend on the disk.
+- An assertion that group commit must share syncs even with no delay could flake on a fast disk; it is
+  now required only when a delay is set.
+
+### 5.5 Final checks done for the whole assignment
+
+Went through the spec sentence by sentence (every must/state/report/explain) against the deliverables.
+Found and closed: the single-thread-with-a-writer configuration for D.1 (one thread doing both),
+the raw histograms for D.1 and the D.3 joins, the sanitizer include-path bug above, and `tools/` plus an
+`INDEX.md` missing from the zip. `tools/verify_all.sh` builds every part from a clean unzip, runs every
+test and sanitizer check and smoke-runs every benchmark; its log is `verification.txt` in the zip.

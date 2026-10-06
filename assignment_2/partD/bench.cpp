@@ -11,6 +11,14 @@
 //   --mode join         index-nested-loop joins in the readers          (D.3)
 //   --mode bigtxn       one transaction of N keys, timed, for N in --sizes (D.3 COW)
 //
+// Write-ahead log (Part E build only, -DHAVE_WAL):
+//   --wal async|write|sync   open a log on the loaded table (the load itself is not logged)
+//   --wal-delay US           Sync: how long a group-commit leader waits for more commits
+//   --committers N           N threads committing flat out instead of the single writer
+//
+// Single-thread server (the D.1 "single thread" configuration with a writer):
+//   --inline-writer-rate R   with one reader and no sync, that same thread also does R puts/s
+//
 // Reclamation (RCU build only):
 //   --reclaim bounded --batch N   the store's own bounded pass, N versions at most
 //   --reclaim none                never free (batch 0)
@@ -21,6 +29,7 @@
 //                                 like a join in progress, so a backlog builds
 #include "kvstore.h"
 #include "schema.h"
+#include <cstdio>
 #ifdef HAVE_RCU
 #include "join.h"
 #endif
@@ -98,6 +107,10 @@ struct Opts {
     long writer_rate = 50000;   // puts (or transactions) per second; 0 off, -1 flat out
     long trigger = 4096;
     int reps = 5;
+    std::string wal;           // "" = no log
+    std::string wal_path = "bench.wal";
+    int wal_delay = 0, committers = 1, wal_flush_ms = 1;
+    long inline_writer_rate = 0;
 };
 
 static Opts parse(int argc, char** argv) {
@@ -121,6 +134,12 @@ static Opts parse(int argc, char** argv) {
     o.writer_rate = geti("--writer-rate", o.writer_rate);
     o.trigger = geti("--trigger", o.trigger);
     o.reps = geti("--reps", o.reps);
+    o.wal = gets("--wal", o.wal);
+    o.wal_path = gets("--wal-path", o.wal_path);
+    o.wal_delay = geti("--wal-delay", o.wal_delay);
+    o.wal_flush_ms = geti("--wal-flush-ms", o.wal_flush_ms);
+    o.committers = geti("--committers", o.committers);
+    o.inline_writer_rate = geti("--inline-writer-rate", 0);
     return o;
 }
 
@@ -183,7 +202,7 @@ struct Shared {
 };
 
 struct WriterStats {
-    uint64_t ops = 0, keys = 0;
+    uint64_t ops = 0, keys = 0, aborted = 0;
     Hist lat;
     uint64_t stw_events = 0, stw_max_ns = 0, stw_total_ns = 0;
 };
@@ -207,6 +226,26 @@ static void reader_point(const KVStore& store, const std::vector<long>& hot, Sha
     }
 }
 
+// One thread serving reads and writes, as a single-threaded store would: every so often
+// it stops reading and does a put. The put's time is part of the call that follows it.
+static void reader_inline_writer(KVStore& store, const std::vector<long>& hot, Shared& sh, long rate, Hist& h) {
+    std::mt19937_64 rng(1000);
+    Trade t = make_trade(0, 0);
+    const uint64_t gap = static_cast<uint64_t>(1000000000L / rate);
+    uint64_t next = now_ns() + gap;
+    while (!sh.stop.load(std::memory_order_relaxed)) {
+        uint64_t t0 = now_ns();
+        if (t0 >= next) {
+            t.trade_id = random_trade_id(rng);
+            store.put(t.trade_id, &t, sizeof t);
+            next += gap;
+        }
+        long id = (!hot.empty() && rng() % 10 < 8) ? hot[rng() % hot.size()] : random_trade_id(rng);
+        store.get(id, &t, sizeof t);
+        h.add(now_ns() - t0);
+    }
+}
+
 #ifdef HAVE_RCU
 static void reader_join(const KVStore& trades, const KVStore& instruments, size_t outer, Shared& sh,
                         Hist& h, uint64_t& rows) {
@@ -223,8 +262,8 @@ static void reader_join(const KVStore& trades, const KVStore& instruments, size_
 #endif
 
 // One writer thread: puts, or transactions of K keys, at a fixed rate or flat out.
-static void writer_loop(KVStore& store, const Opts& o, Shared& sh, WriterStats& ws) {
-    std::mt19937_64 rng(77);
+static void writer_loop(KVStore& store, const Opts& o, Shared& sh, WriterStats& ws, int id = 0) {
+    std::mt19937_64 rng(77 + id);
     Trade t = make_trade(0, 0);
     const auto gap = o.writer_rate > 0 ? std::chrono::nanoseconds(1000000000L / o.writer_rate)
                                        : std::chrono::nanoseconds(0);
@@ -239,8 +278,7 @@ static void writer_loop(KVStore& store, const Opts& o, Shared& sh, WriterStats& 
                 t.ts = static_cast<long>(ws.ops);
                 tx.put(t.trade_id, &t, sizeof t);
             }
-            tx.commit();
-            ws.keys += o.txn;
+            if (tx.commit()) ws.keys += o.txn; else ws.aborted++;
         } else {
             t.trade_id = random_trade_id(rng);
             t.ts = static_cast<long>(ws.ops);
@@ -304,6 +342,17 @@ static int run_workload(const Opts& o) {
     (void)hot;
 #endif
     double heap_loaded = heap_mb();
+#ifdef HAVE_WAL
+    if (!o.wal.empty()) {
+        WalOptions wo;
+        wo.durability = o.wal == "sync" ? Durability::Sync : o.wal == "write" ? Durability::Write : Durability::Async;
+        wo.group_delay_us = o.wal_delay;
+        wo.flush_interval_ms = o.wal_flush_ms;
+        std::remove(o.wal_path.c_str());
+        std::string err;
+        if (!trades.open_wal(o.wal_path, wo, nullptr, &err)) { std::fprintf(stderr, "wal: %s\n", err.c_str()); return 1; }
+    }
+#endif
 
     Shared sh;
     std::vector<Hist> hists(o.readers);
@@ -316,13 +365,18 @@ static int run_workload(const Opts& o) {
             pool.emplace_back(reader_join, std::cref(trades), std::cref(instruments), (size_t)o.outer,
                               std::ref(sh), std::ref(hists[i]), std::ref(rows[i]));
 #endif
+        } else if (o.inline_writer_rate > 0) {
+            pool.emplace_back(reader_inline_writer, std::ref(trades), std::cref(hot), std::ref(sh),
+                              o.inline_writer_rate, std::ref(hists[i]));
         } else {
             pool.emplace_back(reader_point, std::cref(trades), std::cref(hot), std::ref(sh), gate, i, std::ref(hists[i]));
         }
     }
-    WriterStats ws;
-    std::thread writer;
-    if (o.writer_rate != 0) writer = std::thread(writer_loop, std::ref(trades), std::cref(o), std::ref(sh), std::ref(ws));
+    std::vector<WriterStats> wstats(std::max(1, o.committers));
+    std::vector<std::thread> writers;
+    if (o.writer_rate != 0)
+        for (int w = 0; w < std::max(1, o.committers); w++)
+            writers.emplace_back(writer_loop, std::ref(trades), std::cref(o), std::ref(sh), std::ref(wstats[w]), w);
     [[maybe_unused]] uint64_t holds = 0;
 #ifdef HAVE_RCU
     std::thread holder;
@@ -334,7 +388,13 @@ static int run_workload(const Opts& o) {
     double secs = (now_ns() - t0) / 1e9;
     sh.stop = true;
     for (auto& t : pool) t.join();
-    if (writer.joinable()) writer.join();
+    for (auto& w : writers) w.join();
+    WriterStats ws;
+    for (auto& w : wstats) {
+        ws.ops += w.ops; ws.keys += w.keys; ws.aborted += w.aborted; ws.lat.merge(w.lat);
+        ws.stw_events += w.stw_events; ws.stw_total_ns += w.stw_total_ns;
+        if (w.stw_max_ns > ws.stw_max_ns) ws.stw_max_ns = w.stw_max_ns;
+    }
 #ifdef HAVE_RCU
     if (holder.joinable()) holder.join();
 #endif
@@ -362,6 +422,16 @@ static int run_workload(const Opts& o) {
                 (unsigned long)st.backlog_peak, (unsigned long)st.passes, (unsigned long)st.max_pass_freed,
                 st.max_pass_ns / 1000.0, (unsigned long)holds, (unsigned long)ws.stw_events,
                 ws.stw_max_ns / 1000.0, ws.stw_total_ns / 1e6);
+#endif
+#ifdef HAVE_WAL
+    {
+        WalStats wsx = trades.wal_stats();
+        std::printf(" wal=%s wal_records=%lu wal_syncs=%lu wal_bytes=%lu wal_max_sync_us=%.1f wal_sync_avg_us=%.1f wal_max_group=%lu committers=%d aborted=%lu",
+                    o.wal.empty() ? "none" : o.wal.c_str(), (unsigned long)wsx.records, (unsigned long)wsx.syncs,
+                    (unsigned long)wsx.bytes, wsx.sync_ns_max / 1000.0,
+                    wsx.syncs ? wsx.sync_ns_total / 1000.0 / wsx.syncs : 0.0, (unsigned long)wsx.records_per_sync_max,
+                    std::max(1, o.committers), (unsigned long)ws.aborted);
+    }
 #endif
     std::printf(" heap_loaded_mb=%.1f heap_end_mb=%.1f rss_peak_mb=%.1f\n", heap_loaded, heap_mb(), rss_peak_mb());
     return 0;
