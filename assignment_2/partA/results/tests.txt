@@ -1,0 +1,5 @@
+kvstore_test: all passed
+kvstore_test: all passed
+kvstore_test: all passed
+kvstore_test: all passed
+rwlock/r4      ops=5382302   rps=2691151    p50=1.0    us p99=4.4    us p999=5.6    us

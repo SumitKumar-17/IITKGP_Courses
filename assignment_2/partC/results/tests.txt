@@ -1,16 +1,16 @@
 kvstore_test: all passed
-batch=64 readers=6  writes=5581467 erases=372990  reads=737845903 (hits 691530655)
+batch=64 readers=6  writes=5746103 erases=383938  reads=689661335 (hits 646386848)
 torn rows: 0   version regressions: 0
-retired=5935916 freed=5935915 backlog_peak=197 max_pass_freed=64 max_pass_us=12.6
+retired=6110804 freed=6110804 backlog_peak=285 max_pass_freed=64 max_pass_us=14.7
 stress_test: PASS
-atomicity: 2963138 transactions committed, 0 torn snapshots
-atomicity control (plain puts): 28174247 torn snapshots
+atomicity: 2912273 transactions committed, 0 torn snapshots
+atomicity control (plain puts): 28678045 torn snapshots
 write skew: both commits succeeded, doctors on call afterwards = 0 (rule wanted at least 1)
 conflicts: lost update refused, write skew reproduced
-isolation: 102908520 reads under one snapshot while the writer made 1277137 commits, 0 changes seen
-           backlog_peak=1431958 (the held snapshot kept 1431958 versions alive)
-           after release: 23374 writes drained the backlog to 0; no pass freed more than 64
-index: 754983 writes, 66626 snapshot-vs-scan comparisons, 0 mismatches
-join: 40681 joins ran against 177593 writer rounds, 0 inconsistencies
-join on a held snapshot: before=ac7accc6e2abce93 after writes=ac7accc6e2abce93 new snapshot=282f949921b41975
+isolation: 103465648 reads under one snapshot while the writer made 1287074 commits, 0 changes seen
+           backlog_peak=1443060 (the held snapshot kept 1443060 versions alive)
+           after release: 23547 writes drained the backlog to 0; no pass freed more than 64
+index: 752514 writes, 66699 snapshot-vs-scan comparisons, 0 mismatches
+join: 41803 joins ran against 177190 writer rounds, 0 inconsistencies
+join on a held snapshot: before=17fb165c3b156036 after writes=17fb165c3b156036 new snapshot=ca71abab0544e9af
 txn_test: all passed

@@ -1,0 +1,28 @@
+kvstore_test: all passed
+batch=64 readers=6  writes=5520584 erases=368971  reads=732360324 (hits 686400965)
+torn rows: 0   version regressions: 0
+retired=5871258 freed=5871257 backlog_peak=114 max_pass_freed=64 max_pass_us=8.4
+stress_test: PASS
+atomicity: 3013823 transactions committed, 0 torn snapshots
+atomicity control (plain puts): 29811169 torn snapshots
+write skew: both commits succeeded, doctors on call afterwards = 0 (rule wanted at least 1)
+conflicts: lost update refused, write skew reproduced
+isolation: 102712610 reads under one snapshot while the writer made 1272267 commits, 0 changes seen
+           backlog_peak=1426508 (the held snapshot kept 1426508 versions alive)
+           after release: 23289 writes drained the backlog to 0; no pass freed more than 64
+index: 767759 writes, 66678 snapshot-vs-scan comparisons, 0 mismatches
+join: 39970 joins ran against 175685 writer rounds, 0 inconsistencies
+join on a held snapshot: before=9f715fba2f5f220c after writes=9f715fba2f5f220c new snapshot=aceb9abcc96a590b
+txn_test: all passed
+round trip: async, write and sync logs reopened to exactly the state that was written, index included
+truncation: 877 cuts, every one recovered exactly the complete records before it
+corruption: 600 random bit flips, every one stopped replay at exactly the damaged record and reported the valid records it had to drop
+sequence: removed and repeated records were caught by the sequence numbers
+continue: after dropping a torn tail the log took 20 more records and replayed cleanly
+group commit (delay 0 us): 1200 commits shared 278 syncs (4.3 commits per sync), all present after reopen
+group commit (delay 200 us): 1200 commits shared 150 syncs (8.0 commits per sync), all present after reopen
+wal_test: all passed
+write: 40 kills, 578989 commits (about 268318 a second), torn tails found 0, runs that lost acknowledged commits 0 (worst 0 commits, about 0.0 ms of work)
+sync : 40 kills, 8569 commits (about 3971 a second), torn tails found 0, runs that lost acknowledged commits 0 (worst 0 commits, about 0.0 ms of work)
+async: 40 kills, 634323 commits (about 293961 a second), torn tails found 2, runs that lost acknowledged commits 12 (worst 4993 commits, about 17.0 ms of work)
+crash_test: all passed

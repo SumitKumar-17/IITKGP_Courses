@@ -1,5 +1,5 @@
 kvstore_test: all passed
-batch=64 readers=6  writes=5533273 erases=369855  reads=681605672 (hits 638832199)
+batch=64 readers=6  writes=5610091 erases=374927  reads=693450774 (hits 649936233)
 torn rows: 0   version regressions: 0
-retired=5884785 freed=5884784 backlog_peak=106 max_pass_freed=64 max_pass_us=142.5
+retired=5966354 freed=5966353 backlog_peak=418 max_pass_freed=64 max_pass_us=18.4
 stress_test: PASS

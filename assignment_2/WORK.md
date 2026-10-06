@@ -307,7 +307,7 @@ which is what Part D.2's "no reclamation" reference uses. `reclaim_stats()` expo
 
 - `make test`: unit test and the stress test (6 readers, writer doing put and erase on 5,000 keys
   for 5 s; every row has a version and three derived words that the reader recomputes; also checks
-  per-key version never goes backwards). Result: 4.8M writes, 527M reads, 0 torn, 0 regressions.
+  per-key version never goes backwards). Result (recorded in partB/results/tests.txt): 5.5M writes, 682M reads, 0 torn, 0 regressions.
 - `make check`: ASan+UBSan and TSan. **ASan caught a real bug**: `Version` was allocated with `new`
   but freed with `free` from the retire list. Harmless on glibc, still wrong. Fixed by allocating
   versions with `malloc`.
