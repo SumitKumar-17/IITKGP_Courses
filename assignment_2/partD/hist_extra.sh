@@ -27,6 +27,17 @@ for rep in 1 2 3; do
   $pin build/bench_single --mode point --readers 1 --seconds 5 --writer-rate 0 --inline-writer-rate 50000 --label single_inline >> "$out"
 done
 
+# D.1: the same single thread serving 2, 4 and 8 clients in turn (it cannot go faster than one thread).
+out2=results/d1_single_clients.txt
+: > "$out2"
+for clients in 2 4 8; do
+  for rep in 1 2 3; do
+    wait_quiet
+    echo -n "clients=$clients rep=$rep " >> "$out2"
+    $pin build/bench_single --mode point --readers 1 --seconds 5 --writer-rate 0 --inline-writer-rate 50000 --clients $clients --label single_clients >> "$out2"
+  done
+done
+
 # D.3: the join histograms, writer on and paused.
 for w in 50000 0; do
   wait_quiet

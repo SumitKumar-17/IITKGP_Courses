@@ -17,7 +17,12 @@
 //   --committers N           N threads committing flat out instead of the single writer
 //
 // Single-thread server (the D.1 "single thread" configuration with a writer):
-//   --inline-writer-rate R   with one reader and no sync, that same thread also does R puts/s
+//   --inline-writer-rate R   one thread serves the reads and also does R puts/s itself
+//   --clients N              that one thread serves N client request streams in turn
+//
+// Join locality experiment (D.3):
+//   --prewrite N             before the readers start, N random puts on the loaded table, so the
+//                            tree has been rewritten by copy-on-write without a writer running
 //
 // Reclamation (RCU build only):
 //   --reclaim bounded --batch N   the store's own bounded pass, N versions at most
@@ -111,6 +116,8 @@ struct Opts {
     std::string wal_path = "bench.wal";
     int wal_delay = 0, committers = 1, wal_flush_ms = 1;
     long inline_writer_rate = 0;
+    int clients = 1;
+    long prewrite = 0;
 };
 
 static Opts parse(int argc, char** argv) {
@@ -140,6 +147,8 @@ static Opts parse(int argc, char** argv) {
     o.wal_flush_ms = geti("--wal-flush-ms", o.wal_flush_ms);
     o.committers = geti("--committers", o.committers);
     o.inline_writer_rate = geti("--inline-writer-rate", 0);
+    o.clients = geti("--clients", 1);
+    o.prewrite = geti("--prewrite", 0);
     return o;
 }
 
@@ -228,15 +237,21 @@ static void reader_point(const KVStore& store, const std::vector<long>& hot, Sha
 
 // One thread serving reads and writes, as a single-threaded store would: every so often
 // it stops reading and does a put. The put's time is part of the call that follows it.
-static void reader_inline_writer(KVStore& store, const std::vector<long>& hot, Shared& sh, long rate, Hist& h) {
-    std::mt19937_64 rng(1000);
+static void reader_inline_writer(KVStore& store, const std::vector<long>& hot, Shared& sh, long rate, int clients,
+                                 Hist& h) {
+    std::vector<std::mt19937_64> rngs;
+    for (int c = 0; c < clients; c++) rngs.emplace_back(1000 + c);
+    std::mt19937_64 wrng(99);
     Trade t = make_trade(0, 0);
     const uint64_t gap = static_cast<uint64_t>(1000000000L / rate);
     uint64_t next = now_ns() + gap;
+    int c = 0;
     while (!sh.stop.load(std::memory_order_relaxed)) {
+        std::mt19937_64& rng = rngs[c];
+        c = (c + 1) % clients;
         uint64_t t0 = now_ns();
         if (t0 >= next) {
-            t.trade_id = random_trade_id(rng);
+            t.trade_id = random_trade_id(wrng);
             store.put(t.trade_id, &t, sizeof t);
             next += gap;
         }
@@ -341,6 +356,11 @@ static int run_workload(const Opts& o) {
 #else
     (void)hot;
 #endif
+    if (o.prewrite > 0) {
+        std::mt19937_64 prng(4242);
+        Trade pt = make_trade(0, 0);
+        for (long i = 0; i < o.prewrite; i++) { pt.trade_id = random_trade_id(prng); trades.put(pt.trade_id, &pt, sizeof pt); }
+    }
     double heap_loaded = heap_mb();
 #ifdef HAVE_WAL
     if (!o.wal.empty()) {
@@ -367,7 +387,7 @@ static int run_workload(const Opts& o) {
 #endif
         } else if (o.inline_writer_rate > 0) {
             pool.emplace_back(reader_inline_writer, std::ref(trades), std::cref(hot), std::ref(sh),
-                              o.inline_writer_rate, std::ref(hists[i]));
+                              o.inline_writer_rate, o.clients, std::ref(hists[i]));
         } else {
             pool.emplace_back(reader_point, std::cref(trades), std::cref(hot), std::ref(sh), gate, i, std::ref(hists[i]));
         }

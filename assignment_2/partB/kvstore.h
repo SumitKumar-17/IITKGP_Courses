@@ -21,6 +21,8 @@
 
 class alignas(64) KVStore {
 public:
+    // Appendix A interface in this part: put, get, erase, set_reclaim_batch. Methods marked "extra"
+    // are additions for the tests and benchmarks.
     KVStore();
     ~KVStore();
     KVStore(const KVStore&) = delete;
@@ -42,8 +44,10 @@ public:
         uint64_t max_pass_freed;  // most versions freed by a single pass
         uint64_t max_pass_ns;     // longest single pass
     };
+    // extra, not in Appendix A
     ReclaimStats reclaim_stats() const;
 
+    // extra, not in Appendix A
     size_t size() const;
 
     // The workload generator is written against the full API, so these exist

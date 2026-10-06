@@ -1,4 +1,4 @@
-full           param=0     leaf=4   keys=2000     load=  0.03s  put=   48071 ns  writer=   20774/s  readers= 657.9 Mops/s  peak_retired=4  heap=0.3MB
-full           param=0     leaf=4   keys=5000     load=  0.32s  put=  232537 ns  writer=    4299/s  readers= 606.6 Mops/s  peak_retired=2  heap=1.1MB
-full           param=0     leaf=4   keys=10000    load=  1.45s  put=  502780 ns  writer=    1989/s  readers= 603.8 Mops/s  peak_retired=2  heap=2.1MB
-full           param=0     leaf=4   keys=20000    load=  6.31s  put= 1080353 ns  writer=     926/s  readers= 606.6 Mops/s  peak_retired=2  heap=4.1MB
+full           param=0     leaf=4   keys=2000     load=  0.03s  put=   49296 ns  writer=   20260/s  readers= 671.1 Mops/s  peak_retired=4  heap=0.3MB
+full           param=0     leaf=4   keys=5000     load=  0.32s  put=  231926 ns  writer=    4310/s  readers= 613.3 Mops/s  peak_retired=2  heap=1.1MB
+full           param=0     leaf=4   keys=10000    load=  1.77s  put=  568011 ns  writer=    1761/s  readers= 604.7 Mops/s  peak_retired=3  heap=2.1MB
+full           param=0     leaf=4   keys=20000    load=  7.53s  put= 1180651 ns  writer=     847/s  readers= 613.4 Mops/s  peak_retired=2  heap=4.1MB

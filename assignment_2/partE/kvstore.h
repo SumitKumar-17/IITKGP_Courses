@@ -31,6 +31,9 @@ struct StagedWrite {
 
 class alignas(64) KVStore {
 public:
+    // Appendix A interface: put, get, erase, set_reclaim_batch, create_index, index_get, Snapshot,
+    // acquire_snapshot and the snapshot overloads of get, index_get and keys. Methods marked "extra"
+    // are additions: the statistics and reclaim_all() for the tests and benchmarks, open_wal() for Part E.
     KVStore();
     ~KVStore();
     KVStore(const KVStore&) = delete;
@@ -51,20 +54,25 @@ public:
         uint64_t max_pass_freed;
         uint64_t max_pass_ns;
     };
+    // extra, not in Appendix A
     ReclaimStats reclaim_stats() const;
     // Frees every retired version no reader can still need, with no bound. Meant for
     // tests and for the stop-the-world comparison in Part D; the normal path is the
     // bounded pass. Returns how many versions it freed.
+    // extra, not in Appendix A
     size_t reclaim_all();
 
     // Turns on the write-ahead log. An existing log is replayed into the store first
     // (so call this on an empty store), then every commit is logged before it is
     // published. Returns false and fills *error if the log cannot be used. Reads
     // never touch the log.
+    // extra, not in Appendix A
     bool open_wal(const std::string& path, const WalOptions& options = WalOptions(),
                   WalReplayInfo* replay = nullptr, std::string* error = nullptr);
+    // extra, not in Appendix A
     WalStats wal_stats() const;
 
+    // extra, not in Appendix A
     size_t size() const;
 
     // Builds a hash index over the bytes [field_offset, field_offset + field_len)

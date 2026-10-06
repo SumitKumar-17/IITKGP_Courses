@@ -31,6 +31,8 @@
 
 class NOVA_CACHELINE KVStore {
 public:
+    // Appendix A interface in this part: put, get, erase. Methods marked "extra" are additions
+    // for the tests and the workload generator, which is written against the later parts' API.
     KVStore();
     ~KVStore();
     KVStore(const KVStore&) = delete;
@@ -43,6 +45,7 @@ public:
     // Returns true if the key was present and is now removed.
     bool erase(long key);
 
+    // extra, not in Appendix A
     size_t size() const { return size_; }
 
     // The workload generator is written against the full API, so these

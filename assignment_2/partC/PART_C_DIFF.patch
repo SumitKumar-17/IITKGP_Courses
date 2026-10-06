@@ -1,6 +1,6 @@
 --- partB/kvstore.h
 +++ partC/kvstore.h
-@@ -1,24 +1,30 @@
+@@ -1,27 +1,34 @@
 -// kvstore.h (Part B)
 +// kvstore.h (Part C)
  //
@@ -42,8 +42,13 @@
 +
  class alignas(64) KVStore {
  public:
+-    // Appendix A interface in this part: put, get, erase, set_reclaim_batch. Methods marked "extra"
++    // Appendix A interface: put, get, erase, set_reclaim_batch, create_index, index_get, Snapshot,
++    // acquire_snapshot and the snapshot overloads of get, index_get and keys. Methods marked "extra"
+     // are additions for the tests and benchmarks.
      KVStore();
-@@ -30,39 +36,88 @@
+     ~KVStore();
+@@ -32,41 +39,91 @@
      bool get(long key, void* value_out, size_t value_out_len) const;
      bool erase(long key);
  
@@ -66,12 +71,15 @@
 +        uint64_t max_pass_freed;
 +        uint64_t max_pass_ns;
      };
+     // extra, not in Appendix A
      ReclaimStats reclaim_stats() const;
 +    // Frees every retired version no reader can still need, with no bound. Meant for
 +    // tests and for the stop-the-world comparison in Part D; the normal path is the
 +    // bounded pass. Returns how many versions it freed.
++    // extra, not in Appendix A
 +    size_t reclaim_all();
  
+     // extra, not in Appendix A
      size_t size() const;
  
 -    // The workload generator is written against the full API, so these exist
@@ -148,7 +156,7 @@
  
      alignas(64) std::mutex write_mu_;
  
-@@ -71,32 +126,39 @@
+@@ -75,32 +132,39 @@
      Garbage* gc_head_ = nullptr;
      Garbage* gc_tail_ = nullptr;
      uint64_t build_seq_ = 0;

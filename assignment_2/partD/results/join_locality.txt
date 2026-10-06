@@ -1,0 +1,12 @@
+rep=1 variant=paused_fresh ops_per_s=176877
+rep=1 variant=paused_prewritten ops_per_s=228694
+rep=1 variant=writer_on_fresh ops_per_s=194472
+rep=1 variant=writer_on_prewritten ops_per_s=219678
+rep=2 variant=paused_fresh ops_per_s=176380
+rep=2 variant=paused_prewritten ops_per_s=225838
+rep=2 variant=writer_on_fresh ops_per_s=190191
+rep=2 variant=writer_on_prewritten ops_per_s=215113
+rep=3 variant=paused_fresh ops_per_s=171455
+rep=3 variant=paused_prewritten ops_per_s=218734
+rep=3 variant=writer_on_fresh ops_per_s=185590
+rep=3 variant=writer_on_prewritten ops_per_s=209673

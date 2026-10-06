@@ -25,7 +25,7 @@ So the generator's own bookkeeping costs the RCU store about **30% of its 8-read
 
 ## D.1 Point-query throughput and the 100k target
 
-The first table is the provided generator, default parameters. `single_thread` cannot run with a writer (it has no synchronisation), so it appears with one reader as the genuine single-thread case and, for reference, with more read-only readers and no writer: the ceiling an unsynchronised store reaches when nothing writes.
+The first table is the provided generator, default parameters. `single_thread` cannot run with a second thread writing (it has no synchronisation), so in this table it appears with one reader as the genuine single-thread case and, for reference, with more read-only readers and no writer: the ceiling an unsynchronised store reaches when nothing writes. A single-threaded store serving 2, 4 or 8 clients *with* a writer means one thread serving all of them, and that is measured in the harness table below.
 
 | store | readers | reads/s (M) | p50 (us) | p99 (us) | p999 (us) | the 3 runs (M) |
 |---|---|---|---|---|---|---|
@@ -49,7 +49,8 @@ The same stores in the histogram harness (single-thread has no writer; the other
 | store | readers | reads/s (M) | p50 (ns) | p99 (ns) | p999 (ns) | longest call (us) |
 |---|---|---|---|---|---|---|
 | single_thread, no writer | 1 / 8 | 21.6 / 166.8 | 18 | 47 | 63 | 16 / 221 |
-| single_thread, one thread doing the reads **and** 50,000 puts/s | 1 | 19.9 | 27 | 70 | 992 | 35 |
+| single_thread, one thread doing the reads **and** 50,000 puts/s | 1 client | 19.9 | 27 | 70 | 992 | 35 |
+| same thread serving 2, 4, 8 clients in turn | 2 / 4 / 8 clients | 19.6 / 19.6 / 19.4 | 28 | 71 | 1,000 | 35 / 18 / 52 |
 | global_lock | 1 | 19.1 | 23 | 53 | 256 | 17 |
 | | 2 | 23.2 | 50 | 348 | 592 | 111 |
 | | 4 | 19.6 | 85 | 1,344 | 2,720 | 362 |
@@ -64,6 +65,8 @@ The same stores in the histogram harness (single-thread has no writer; the other
 | | 8 | **112.3** | 37 | 168 | 284 | 222 |
 
 ![](results/d1_scaling.png)
+
+**A single thread does not scale at all.** Serving 2, 4 or 8 clients in turn, one thread stays at 19.4 to 19.6M reads/s in total, the same as with one client, so each client's share falls in proportion to the client count. That is the single-thread row of the "where does it stop scaling" question: it stops at one.
 
 **Where the lock-based stores stop scaling.** Taking "stops scaling" as the reader count after which doubling the readers adds under 10%: **global_lock stops at 2 readers** (21.5M, then 21.0M at 4 and 12.2M at 8), and **rwlock stops at 2 readers** (24.8M, then 21.8M and 20.8M). The harness agrees: both peak at 2 readers and never get back to that rate. Both then get slower as readers are added. Their tails explode too: at 8 readers p999 is 6.5 us and 4.8 us for the locks against 0.26 us for RCU, **25 times and 18 times worse**.
 
@@ -135,7 +138,14 @@ Two references. **No reclamation** never frees. **Naive stop-the-world** parks e
 | 100,000 | on | 589 | 58,879 | 13,369 | 14,549 | 15,204 | 15,318 |
 | 100,000 | paused | 590 | 59,039 | 13,500 | 13,894 | 15,073 | 15,285 |
 
-**The concurrent writer costs a running join nothing we can measure.** The full-table join (100,000 outer rows) is 589 against 590 joins/s, with p99 within 5%. The 1,000-row join was about 10% *faster* with the writer on, and repeatably so (all three runs of each agree to 0.2%). We checked whether it was thread placement: with 4 readers the writer-on run is still 5% faster, and 10% faster when the readers are pinned to separate physical cores (`experiments/join_placement.sh`). So it is not placement. We have no verified explanation. Our guess, which we did not test, is that the writer's copy-on-write allocates the nodes it touches back to back, so the rows a join keeps re-reading end up closer together in memory than they were after the initial load. The honest summary is "no cost, and a small unexplained benefit". The writer does show up once, in the 1,703 us longest join, against 256 us when paused.
+**The concurrent writer costs a running join little, and what it does cost is hidden by a locality effect we tested.** The full-table join (100,000 outer rows) is 589 against 590 joins/s with p99 within 5%. The 1,000-row join was about 10% *faster* with the writer on, repeatably (all three runs of each agree to 0.2%), and with 4 readers on separate physical cores it was still 5% to 10% faster, so thread placement is not the reason. Our guess was that the writer's copy-on-write allocates the nodes it touches one after another, so after enough writes the rows a join keeps re-reading sit closer together in memory than they did after the initial load. We tested it (`experiments/join_locality.sh`, 8 readers, 1,000-row joins, median of 3):
+
+| table | writer paused | writer on (50,000 puts/s) |
+|---|---|---|
+| just loaded | 176k joins/s | 190k joins/s |
+| rewritten first by 2,000,000 random puts | **226k joins/s** | 215k joins/s |
+
+**The guess holds.** A table that has been rewritten by copy-on-write joins 28% faster than a freshly loaded one even with the writer paused, and the writer's apparent speed-up on a fresh table is the table being re-laid-out while the join runs. Once the layout is the same in both columns the writer's real cost shows: 215k against 226k joins/s, about 5%. The writer does show up in the tail too, with a 1,703 us longest join against 256 us when paused.
 
 **Multi-key transaction commit throughput, writer flat out** (RCU store against the in-place rwlock store):
 
@@ -162,6 +172,19 @@ Two readings. With nobody reading, batching helps the RCU store: keys per second
 
 COW helps little or hurts when **a single write touches a large fraction of the table.** A transaction that rewrites 65,536 to 100,000 of the 100,000 rows must copy nearly every leaf and inner node, so it is **4x slower than updating in place** (15.9 ms against 4.1 ms) and it needs **48 MB of extra heap, about as much as the table itself** (40 MB), until the old version is reclaimed: the store briefly holds two copies. A bulk reload or a table-wide recalculation is exactly that workload. The per-key cost also rises from about 80 ns to 160 to 170 ns as the transaction grows; we did not isolate why (the number of nodes allocated and later freed per key is the obvious suspect). The same mechanism makes a **long-held snapshot expensive** (1.4 million retired versions in 3 s of heavy writing in the Part C test). And for tiny writes, every write costs 1.6 to 4 times the in-place price per key (168 ns against 104 ns for a single key, 159 against 41 for 100,000), a price worth paying only because readers are never blocked.
 
+## A second machine
+
+To check that the conclusions are not specific to the 32-thread server, the D.1 comparison (our harness, 50,000 puts/s writer, no writer for the unsynchronised store, median of 3 runs of 5 s) was repeated with `tools/second_machine.sh` on a laptop: an Intel i5-6300U, 2 cores and 4 hardware threads, so the 8-reader rows share cores.
+
+| store | 1 reader | 2 | 4 | 8 | p999 at 8 readers |
+|---|---|---|---|---|---|
+| single_thread, no writer (M reads/s) | 7.7 | 16.9 | 23.3 | 20.3 | 504 ns |
+| global_lock | 5.6 | 3.0 | 3.1 | 2.7 | 119,808 ns |
+| rwlock | 6.0 | 7.4 | 10.5 | 10.3 | 1,808 ns |
+| rcu | 5.5 | 10.6 | 14.3 | 15.5 | 688 ns |
+
+The ranking is the same as on the server: **the global lock gets slower as soon as a second reader arrives**, the rwlock levels off at 4 readers, and RCU keeps gaining up to the number of hardware threads (2.8x from 1 to 8 readers) with a p999 that is 170 times better than the global lock's. The differences from the server: the absolute rates are lower, and on this machine RCU is level with the global lock at one reader (5.5M against 5.6M) where on the server it was 14% behind. Raw output: `results/second_machine_laptop.txt`.
+
 ## Raw data
 
-`results/d1.csv` (generator), `results/d1b.txt` (harness), `results/d1_single_inline.txt` (single thread with its own writer), `results/d1_time.txt` (CPU time and context switches of each D.1 run), `results/d2.txt` and `results/hist/*.csv` (latency histograms: `d1_*` for D.1 at 8 readers, `bursty_*` for D.2, `d3_join1000_*` for the D.3 joins; each row is a bucket's lower bound in ns and its count), `results/d3.txt`, `results/profile/` (perf stat, folded stacks and flame graphs for RCU at 1 and 8 readers; the same for the two lock stores at 1, 2, 4 and 8 readers is in `../partA/results/profile/`), `results/padded_generator.txt`, `results/envsweep.txt`, `results/quiet.log` (the idle-CPU check before each group). Scripts: `d1.sh`, `d1b.sh`, `d2.sh`, `d3.sh`, `profile_rcu.sh`, `bench.cpp`; summaries by `tools/summarize_d.py`, charts by `tools/make_charts.py`.
+`results/d1.csv` (generator), `results/d1b.txt` (harness), `results/d1_single_inline.txt` and `results/d1_single_clients.txt` (single thread with its own writer, serving 1 and 2, 4, 8 clients), `results/join_locality.txt` (the join locality test), `results/second_machine_laptop.txt`, `results/d1_time.txt` (CPU time and context switches of each D.1 run), `results/d2.txt` and `results/hist/*.csv` (latency histograms: `d1_*` for D.1 at 8 readers, `bursty_*` for D.2, `d3_join1000_*` for the D.3 joins; each row is a bucket's lower bound in ns and its count), `results/d3.txt`, `results/profile/` (perf stat, folded stacks and flame graphs for RCU at 1 and 8 readers; the same for the two lock stores at 1, 2, 4 and 8 readers is in `../partA/results/profile/`), `results/padded_generator.txt`, `results/envsweep.txt`, `results/quiet.log` (the idle-CPU check before each group). Scripts: `d1.sh`, `d1b.sh`, `d2.sh`, `d3.sh`, `profile_rcu.sh`, `bench.cpp`; summaries by `tools/summarize_d.py`, charts by `tools/make_charts.py`.

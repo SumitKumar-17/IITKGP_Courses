@@ -203,9 +203,12 @@ static Built build_log(const char* name, int records) {
     return b;
 }
 
-static void replay_into(const std::string& path, WalReplayInfo& info, State& st, bool& ok, std::string& err) {
+static void replay_into(const std::string& path, WalReplayInfo& info, State& st, bool& ok, std::string& err,
+                        bool repair = false) {
     KVStore r;
-    ok = r.open_wal(path, opts(Durability::Write), &info, &err);
+    WalOptions o = opts(Durability::Write);
+    o.repair = repair;
+    ok = r.open_wal(path, o, &info, &err);
     if (ok) st = read_state(r);
 }
 
@@ -252,17 +255,25 @@ static void test_corruption(const Built& b) {
         write_bytes(p, bad);
         int j = 0;                                   // the record the damaged byte lies in
         while (b.end_of_record[j + 1] <= pos) j++;
+        const int after = total - j - 1;                 // valid records that follow the damaged one
         WalReplayInfo info; State st; bool ok; std::string err;
         replay_into(p, info, st, ok, err);
+        if (after > 0) {
+            // Corruption in the middle: the default is to refuse, and to leave the file alone.
+            CHECKF(!ok && err.find("middle of the log") != std::string::npos, "flip at %lu: opened a log damaged in the middle",
+                   (unsigned long)pos);
+            CHECKF(file_bytes(p) == bad, "flip at %lu: a refused open changed the file", (unsigned long)pos);
+            CHECKF(info.records_after_damage == (uint64_t)after, "flip at %lu (record %d of %d): %lu valid records reported after the damage, expected %d",
+                   (unsigned long)pos, j + 1, total, (unsigned long)info.records_after_damage, after);
+            // With repair the log opens at the last good record.
+            replay_into(p, info, st, ok, err, true);
+        }
         CHECKF(ok, "flip at %lu: %s", (unsigned long)pos, err.c_str());
         CHECKF(info.records == (uint64_t)j, "flip at %lu (record %d): replayed %lu", (unsigned long)pos, j + 1, (unsigned long)info.records);
         CHECKF(st == b.after[j], "flip at %lu: state differs from the state before the damaged record", (unsigned long)pos);
         CHECK(!info.clean_end && !info.stopped.empty());
-        // Damage in a record that is not the last has valid records after it: that is
-        // corruption, not a torn tail, and replay must say so.
-        CHECKF(info.records_after_damage == (uint64_t)(total - j - 1),
-               "flip at %lu (record %d of %d): %lu records after the damage reported, expected %d", (unsigned long)pos,
-               j + 1, total, (unsigned long)info.records_after_damage, total - j - 1);
+        CHECKF(info.records_after_damage == (uint64_t)after, "flip at %lu: %lu records after the damage, expected %d",
+               (unsigned long)pos, (unsigned long)info.records_after_damage, after);
         stopped_early++;
     }
     // Damage inside the file header is refused outright.
@@ -275,7 +286,7 @@ static void test_corruption(const Built& b) {
         std::string err;
         CHECK(!r.open_wal(p, opts(Durability::Write), nullptr, &err));
     }
-    std::printf("corruption: %d random bit flips, every one stopped replay at exactly the damaged record and reported the valid records it had to drop\n", stopped_early);
+    std::printf("corruption: %d random bit flips; damage in the middle was refused with the file untouched, and with repair every one stopped replay at exactly the damaged record\n", stopped_early);
 }
 
 // -------------------------------------------------------------------- 4. sequence
@@ -293,6 +304,8 @@ static void test_sequence(const Built& b) {
             int expect = variant == 0 ? k - 1 : k;
             WalReplayInfo info; State st; bool ok; std::string err;
             replay_into(p, info, st, ok, err);
+            CHECK(!ok);                                       // valid records follow the gap: refused by default
+            replay_into(p, info, st, ok, err, true);
             CHECK(ok);
             CHECKF(info.records == (uint64_t)expect, "%s %d: replayed %lu, expected %d", variant ? "repeat" : "remove", k, (unsigned long)info.records, expect);
             CHECK(st == b.after[expect]);
@@ -374,6 +387,7 @@ static void test_misc() {
     KVStore a;
     std::string err;
     CHECK(!a.open_wal(p, opts(Durability::Write), nullptr, &err) && !err.empty());
+    CHECK(file_bytes(p) == std::string(100, 'x'));   // a failed open must not touch the file
 
     std::string q = tmp("twice.wal");
     ::unlink(q.c_str());

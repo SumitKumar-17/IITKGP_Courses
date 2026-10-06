@@ -37,6 +37,12 @@ struct WalOptions {
     int group_delay_us = 0;        // Sync: how long a leader waits for more records before flushing
     int flush_interval_ms = 1;     // Async: write+sync period. Write: background sync period, 0 = never
     size_t prealloc_bytes = 64u << 20;
+    // What to do when replay finds damage with valid records AFTER it (corruption in the middle
+    // of the log, as opposed to a torn tail from a crash). By default open() refuses and leaves
+    // the file untouched, because carrying on would silently discard commits that were
+    // acknowledged. Set this to discard everything from the damage on (an operator's decision,
+    // for example after confirming the lost range against a replica).
+    bool repair = false;
 };
 
 struct WalOp {
@@ -66,6 +72,7 @@ struct WalStats {
     uint64_t sync_ns_total = 0, sync_ns_max = 0;
     uint64_t records_per_sync_max = 0;
     uint64_t durable_lsn = 0, appended_lsn = 0;
+    uint64_t synced_bytes = 0;     // file offset up to which an fdatasync has completed (the file header included)
 };
 
 class Wal {
@@ -105,6 +112,7 @@ private:
     WalOptions opt_;
     std::string path_;
     std::atomic<bool> failed_{false};
+    bool ready_ = false;                // set once open() has succeeded; a half-opened log must not touch the file
 
     std::mutex io_mu_;                  // serialises writes and syncs of the file
     std::mutex buf_mu_;                 // guards active_, written_, next_lsn_, appended_
@@ -128,4 +136,5 @@ private:
     std::atomic<uint64_t> records_{0}, bytes_{0}, write_calls_{0}, syncs_{0};
     std::atomic<uint64_t> sync_ns_total_{0}, sync_ns_max_{0}, per_sync_max_{0};
     uint64_t last_synced_appended_ = 0;
+    std::atomic<uint64_t> synced_end_{0};
 };

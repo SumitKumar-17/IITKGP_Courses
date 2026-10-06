@@ -549,3 +549,50 @@ Found and closed: the single-thread-with-a-writer configuration for D.1 (one thr
 the raw histograms for D.1 and the D.3 joins, the sanitizer include-path bug above, and `tools/` plus an
 `INDEX.md` missing from the zip. `tools/verify_all.sh` builds every part from a clean unzip, runs every
 test and sanitizer check and smoke-runs every benchmark; its log is `verification.txt` in the zip.
+
+---
+
+## 6. The last round of fixes
+
+After the first full pass we listed everything that was still weak and fixed what could be fixed.
+(Per your instruction we did not add PDFs for the B, C and E notes: the READMEs are what the assignment
+asks for. We also did not add anything the assignment does not ask for.)
+
+1. **D.1 single-thread configuration.** An unsynchronised store cannot run with a second thread writing,
+   so "single thread at 1, 2, 4, 8 readers with a writer" is modelled as one thread serving N clients in
+   turn (`--clients N` in `bench.cpp`). Result: 19.4 to 19.6M reads/s for 2, 4 and 8 clients, the same as for
+   one, so it does not scale at all. Raw data: `partD/results/d1_single_clients.txt`.
+2. **The unexplained join speed-up is now explained, by experiment.** Guess: copy-on-write re-lays-out the
+   nodes the writer touches next to each other. Test (`partD/experiments/join_locality.sh`): joins on a
+   table rewritten by 2,000,000 puts, writer paused, were 28% faster than on a freshly loaded table
+   (226k vs 176k joins/s), and with the layout equalised the writer's real cost shows as about 5%.
+3. **Corruption in the middle of the log is refused by default.** Before, replay dropped everything after
+   any bad record, including acknowledged commits, without saying so. Now, if valid records follow the
+   damage, `open_wal` refuses and leaves the file alone; `WalOptions::repair` is the explicit way to discard
+   them. A torn tail (nothing valid after it) is still dropped automatically. Replay validates in a first
+   pass and applies in a second, so a refusal happens before anything has been applied.
+4. **Simulated power loss.** The log tracks the file offset up to which an `fdatasync` has completed.
+   `crash_test` now kills the child, then damages only what lies beyond that offset (dropped, cut
+   mid-record, random garbage, a zeroed 4 KB page with later pages surviving) and recovers. Sync lost no
+   acknowledged commit in any of the 160 runs (all had unsynced data to damage).
+5. **API wording.** Each header now says which methods are the Appendix A interface and marks the rest
+   "extra, not in Appendix A".
+6. **Second machine.** `tools/second_machine.sh` repeats D.1 anywhere in about six minutes. We ran it on
+   the laptop (i5-6300U, 4 threads): same ranking, results in the D report and
+   `partD/results/second_machine_laptop.txt`. Run it on any other machine you like and keep the output.
+7. **Organisation.** `INDEX.md` in the zip is now a map from each deliverable the assignment asks for to
+   its file, plus how to build, test and reproduce.
+
+Bugs found by the new tests while doing this (worth remembering how):
+
+- **A failed `open_wal` truncated the log file to zero bytes.** The half-opened `Wal` object was destroyed
+  on the failure path and its destructor ran the normal shutdown (trim the file to `file_end_`, which was
+  still 0). It would have wiped any file passed by mistake. Found because the new "a refused open must leave
+  the file untouched" check failed 3,000 times. Fix: shutdown work only runs if `open()` finished
+  (`ready_` flag).
+- **A bug in our own power-loss test.** The "synced offset" shared with the child started at 16 (the file
+  header) instead of the length of the log just recovered, so when the child was killed before its first
+  commit the "drop" scenario wiped the whole log. It showed up as an absurd "worst loss 236,903 commits" at
+  the Write level, which is why every number that looks wrong gets checked before it goes in a document.
+- A test of the new script `tools/second_machine.sh` on the laptop printed zeros: `ops_per_s=` also
+  matches inside `writer_ops_per_s=`, and a trailing blank line made the median pick an empty value.

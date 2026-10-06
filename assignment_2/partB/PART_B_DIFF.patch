@@ -1,6 +1,6 @@
 --- partA/kvstore.h
 +++ partB/kvstore.h
-@@ -1,97 +1,84 @@
+@@ -1,100 +1,88 @@
 -// kvstore.h (Part A)
 +// kvstore.h (Part B)
  //
@@ -46,6 +46,10 @@
 -class NOVA_CACHELINE KVStore {
 +class alignas(64) KVStore {
  public:
+-    // Appendix A interface in this part: put, get, erase. Methods marked "extra" are additions
+-    // for the tests and the workload generator, which is written against the later parts' API.
++    // Appendix A interface in this part: put, get, erase, set_reclaim_batch. Methods marked "extra"
++    // are additions for the tests and benchmarks.
      KVStore();
      ~KVStore();
      KVStore(const KVStore&) = delete;
@@ -58,7 +62,6 @@
 -    // Returns true if the key was present and is now removed.
      bool erase(long key);
  
--    size_t size() const { return size_; }
 +    // Most retired versions one reclamation pass may free. 0 turns
 +    // reclamation off (nothing is ever freed until the store is destroyed).
 +    void set_reclaim_batch(int n);
@@ -71,12 +74,15 @@
 +        uint64_t max_pass_freed;  // most versions freed by a single pass
 +        uint64_t max_pass_ns;     // longest single pass
 +    };
+     // extra, not in Appendix A
+-    size_t size() const { return size_; }
 +    ReclaimStats reclaim_stats() const;
-+
-+    size_t size() const;
  
 -    // The workload generator is written against the full API, so these
 -    // exist here to let it link. Secondary indexes arrive in Part C.
++    // extra, not in Appendix A
++    size_t size() const;
++
 +    // The workload generator is written against the full API, so these exist
 +    // here to let it link. Secondary indexes arrive in Part C.
      bool create_index(size_t field_offset, size_t field_len);

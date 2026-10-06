@@ -176,6 +176,7 @@ std::unique_ptr<Wal> Wal::open(const std::string& path, const WalOptions& opt, c
             err = "not a NOVA-KV log (bad file header)";
             return nullptr;
         }
+        // Pass one only validates, so that a refusal happens before anything has been applied.
         std::vector<WalOp> ops;
         while (true) {
             if (pos + kRecHeader > size) {
@@ -202,7 +203,6 @@ std::unique_ptr<Wal> Wal::open(const std::string& path, const WalOptions& opt, c
             if (!parse_ops(payload, h.payload_len, h.nops, ops)) {
                 info.clean_end = false; info.stopped = "malformed operations"; break;
             }
-            apply(ops.data(), ops.size());
             info.records++;
             info.ops += h.nops;
             pos += kRecHeader + h.payload_len;
@@ -213,6 +213,24 @@ std::unique_ptr<Wal> Wal::open(const std::string& path, const WalOptions& opt, c
             while (last > pos && base[last - 1] == 0) last--;
             info.discarded_bytes = last - pos;
             info.records_after_damage = count_valid_records_after(base, pos + 1, size);
+            if (info.records_after_damage > 0 && !opt.repair) {
+                munmap(map, size);
+                err = "damage in the middle of the log at byte " + std::to_string(pos) + " (" + info.stopped + "): " +
+                      std::to_string(info.records_after_damage) + " valid records follow it and would be discarded; " +
+                      "the file was left untouched (set WalOptions::repair to discard them)";
+                return nullptr;
+            }
+        }
+        // Pass two applies the records that passed.
+        {
+            uint64_t at = kFileHeader;
+            for (uint64_t r = 0; r < info.records; r++) {
+                RecHeader h;
+                std::memcpy(&h, base + at, sizeof h);
+                parse_ops(base + at + kRecHeader, h.payload_len, h.nops, ops);
+                apply(ops.data(), ops.size());
+                at += kRecHeader + h.payload_len;
+            }
         }
         munmap(map, size);
         w->allocated_ = size;
@@ -231,10 +249,12 @@ std::unique_ptr<Wal> Wal::open(const std::string& path, const WalOptions& opt, c
     w->appended_ = expected - 1;
     w->durable_ = expected - 1;
     w->last_synced_appended_ = expected - 1;
+    w->synced_end_ = pos;
     if (fdatasync(w->fd_) != 0) { err = std::string("fdatasync: ") + std::strerror(errno); return nullptr; }
 
     bool need_bg = opt.durability == Durability::Async ||
                    (opt.durability == Durability::Write && opt.flush_interval_ms > 0);
+    w->ready_ = true;
     if (need_bg) w->bg_ = std::thread(&Wal::background, w.get());
     return w;
 }
@@ -244,7 +264,7 @@ Wal::~Wal() {
     bg_cv_.notify_all();
     if (bg_.joinable()) bg_.join();
     if (fd_ >= 0) {
-        if (!failed_.load()) {
+        if (ready_ && !failed_.load()) {
             flush_buffer();
             std::lock_guard<std::mutex> g(io_mu_);
             if (ftruncate(fd_, static_cast<off_t>(file_end_)) != 0) { /* the tail is zeros anyway */ }
@@ -283,9 +303,18 @@ bool Wal::write_out(const char* data, size_t n) {
 void Wal::sync_file() {
     // No lock here: fdatasync only has to cover writes that finished before it started, and
     // holding the file lock would make every commit's write() wait behind it.
+    uint64_t covered;
+    {
+        std::lock_guard<std::mutex> g(io_mu_);
+        covered = file_end_;           // everything written so far is covered by the sync below
+    }
     uint64_t t0 = now_ns();
     int rc = fdatasync(fd_);
     uint64_t d = now_ns() - t0;
+    if (rc == 0) {
+        uint64_t prev = synced_end_.load();
+        while (covered > prev && !synced_end_.compare_exchange_weak(prev, covered)) {}
+    }
     if (rc != 0) failed_ = true;
     syncs_++;
     sync_ns_total_ += d;
@@ -403,5 +432,6 @@ WalStats Wal::stats() const {
     s.sync_ns_total = sync_ns_total_.load();
     s.sync_ns_max = sync_ns_max_.load();
     s.records_per_sync_max = per_sync_max_.load();
+    s.synced_bytes = synced_end_.load();
     return s;
 }

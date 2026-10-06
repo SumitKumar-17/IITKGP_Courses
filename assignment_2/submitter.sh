@@ -41,28 +41,63 @@ cp assignment_2.pdf "$STAGE/" 2>/dev/null || true
 [ -f verification.txt ] && cp verification.txt "$STAGE/" || true
 
 cat > "$STAGE/INDEX.md" <<'EOF'
-# NOVA-KV, Assignment 2: layout of this submission
+# NOVA-KV, Assignment 2
 
 Sumit Kumar (22CS30056), Jatin Mahawar (22CS30032)
 
-| folder | what is in it |
-|---|---|
-| `common/` | the provided workload generator (unmodified), the shared driver `driver_main.h`, `schema.h` |
-| `partA/` | baseline store, three drivers, tests, profiling scripts, flame graphs, layout benchmark. **`REPORT.pdf`** (the 5-page report) |
-| `partB/` | RCU store, stress test, design and reclamation benchmarks. **`README.md`**, `PART_B_DIFF.patch` |
-| `partC/` | transactions, index, snapshots, join. **`README.md`** (both design notes), `PART_C_DIFF.patch` |
-| `partD/` | benchmark harness, scripts, all raw data. **`REPORT.pdf`** |
-| `partE/` | (bonus) write-ahead log, its tests, crash test and benchmarks. **`README.md`**, `PART_E_DIFF.patch` |
-| `tools/` | summaries, charts, environment and layout checks, the idle-CPU check |
+The store has no durability in Parts A to D: if the process dies, the data is gone. Part E (the bonus)
+adds a write-ahead log.
 
-Build and test a part: `make -C partA test` (and `check` for the sanitizer builds), same for `partB`, `partC`, `partE`.
-`tools/verify_all.sh` does all of that for every part from scratch; `verification.txt` is its log from before submission.
-Each part keeps its own `kvstore.h` / `kvstore.cpp`, so the diffs between parts are real files.
-Everything was built and measured with `g++ -std=c++17` on a 32-thread Intel i9-13900K, pinned to
-logical CPUs 0 to 15. The store has no durability in any of these parts: if the process dies the data is gone.
+## What is where, in the order of the assignment
 
-Two measurement issues are explained in `partA/REPORT.pdf` (section 2) and `partD/REPORT.pdf` (section 0):
-the cache-line layout of the store object, and false sharing inside the provided generator.
+| Part | Asked for | Files |
+|---|---|---|
+| A | store, sanity test, three drivers | `partA/kvstore.{h,cpp}`, `kvstore_test.cpp`, `single_thread.cpp`, `global_lock.cpp`, `rwlock.cpp` |
+| A | perf outputs and flame graphs | `partA/results/profile/` (perf stat, folded stacks, SVG and PNG for both lock stores at 1, 2, 4, 8 readers) |
+| A | layout microbenchmark | `partA/bench/layout_bench.cpp` (NSM, DSM, PAX), `table_bench.cpp` (hash table choice) |
+| A | report, 5 pages at most | `partA/REPORT.pdf` (source `REPORT.md`) |
+| B | RCU store and its diff against Part A | `partB/kvstore.{h,cpp}`, `PART_B_DIFF.patch` |
+| B | README on reclamation and the tunable | `partB/README.md` |
+| B | stress test, no torn rows | `partB/stress_test.cpp`, output in `partB/results/tests.txt` |
+| C | transactions, index, snapshots, join, and the diff against Part B | `partC/kvstore.{h,cpp}`, `join.h`, `PART_C_DIFF.patch` |
+| C | design notes (C.1 isolation, C.2 index and join) | `partC/README.md` |
+| C | tests | `partC/txn_test.cpp`, `kvstore_test.cpp`, output in `partC/results/tests.txt` |
+| D | D.1, D.2, D.3 results, explanations, raw data | `partD/REPORT.pdf` (source `REPORT.md`), raw data in `partD/results/` |
+| D | benchmark harness and scripts | `partD/bench.cpp`, `d1.sh`, `d1b.sh`, `d2.sh`, `d3.sh`, `hist_extra.sh`, `experiments/` |
+| E | write-ahead log and its diff against Part C | `partE/wal.{h,cpp}`, `kvstore.{h,cpp}`, `PART_E_DIFF.patch` |
+| E | fsync and group commit note, cost, what is missing | `partE/README.md` |
+| E | tests | `partE/wal_test.cpp`, `crash_test.cpp`, output in `partE/results/tests.txt` |
+
+`common/` holds the provided workload generator (unchanged), the shared driver `driver_main.h` and `schema.h`.
+`tools/` holds the scripts that summarise results, draw the charts and check the measurement setup.
+`verification.txt` is the log of building every part from a clean copy and running every test.
+
+Each part keeps its own `kvstore.h` and `kvstore.cpp`, so the diffs between parts are real files.
+The header of each store marks which methods are the Appendix A interface and which are extras.
+
+## Build and test
+
+    make -C partA test        # unit test; `make -C partA check` adds the sanitizer builds
+    make -C partB test        # likewise partC and partE
+    tools/verify_all.sh       # everything, from scratch, with PASS or FAIL per step
+
+## Reproduce the measurements
+
+All of them ran on one 32-thread Intel i9-13900K, pinned to logical CPUs 0 to 15, with `g++ -std=c++17`.
+
+| script | measures | output |
+|---|---|---|
+| `partA/scaling.sh`, `partA/profile.sh` | Part A throughput, perf stat, flame graphs | `partA/results/` |
+| `partB/bench/sweep.sh`, `partB/compare_schemes.sh` | version structure choice, epochs against hazard pointers | `partB/results/` |
+| `partD/d1.sh`, `d1b.sh` | D.1 with the provided generator, and with our harness | `partD/results/d1.csv`, `d1b.txt` |
+| `partD/d2.sh` | D.2 reclaim batch tuning | `partD/results/d2.txt`, `hist/` |
+| `partD/d3.sh`, `partD/experiments/join_locality.sh` | D.3 join, commits, copy-on-write | `partD/results/d3.txt`, `join_locality.txt` |
+| `partE/bench_wal.sh` | what the log costs, group commit | `partE/results/bench_wal.txt` |
+| `tools/second_machine.sh` | the D.1 comparison on another machine, in about six minutes | `second_machine_results.txt` |
+| `tools/envsweep.sh`, `tools/layout_sensitivity.sh` | that results do not depend on where the store object lands in memory | `partD/results/envsweep.txt`, `partA/results/layout_sensitivity.txt` |
+
+Two measurement problems are explained in `partA/REPORT.pdf` (section 2) and `partD/REPORT.pdf` (section 0):
+the cache line layout of the store object, and false sharing inside the provided generator.
 EOF
 
 rm -f "$NAME.zip"

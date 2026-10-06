@@ -18,7 +18,11 @@ A record is `[24-byte header][operations]`. The header holds a magic number, the
 **log sequence number** and a **CRC32C over the header and the payload**. Replay checks, in order:
 the magic, that the record fits in the file, the checksum, that the sequence number is exactly the
 next one, and that the operations parse and add up to the length. It stops at the first record that
-fails and drops everything after it. The file is preallocated (so the unused tail is zeros, which
+fails. If nothing valid follows (a torn tail, which is what a crash in the middle of an append leaves),
+the tail is dropped and the log opens. **If valid records do follow the damage, that is corruption in the
+middle of the log, and `open_wal` refuses and leaves the file untouched**, because carrying on would
+quietly throw away commits that were acknowledged. `WalOptions::repair` is the explicit way to discard
+everything from the damage on. A failed open never modifies the file. The file is preallocated (so the unused tail is zeros, which
 means "end of log"), the directory entry is fsynced when the file is created, and a failed `write`
 or `fdatasync` puts the log in a failed state where no further commit is accepted (we never retry an
 `fsync` that reported an error, because after one the kernel may already have dropped the dirty data).
@@ -51,7 +55,7 @@ Three levels, chosen when the log is opened:
 
 | level | `commit()` returns after | survives `kill -9` | survives a power cut or OS crash | what can be lost |
 |---|---|---|---|---|
-| **Async** | the record is in the in-process buffer; a thread writes and `fdatasync`s every `flush_interval_ms` | no | no | the last flush interval plus any slow sync (measured below: 17 ms of commits in the recorded run, 60 ms in an earlier one when the disk was slow) |
+| **Async** | the record is in the in-process buffer; a thread writes and `fdatasync`s every `flush_interval_ms` | no | no | the last flush interval plus any slow sync (measured below: 18.7 ms of commits in the recorded run, up to 60 ms in earlier runs when the disk was slow) |
 | **Write** | the record is in the kernel's page cache (`write()` has returned); a thread `fdatasync`s every `flush_interval_ms` | **yes** | until the next background sync | nothing on a process crash; at most the last interval on power loss |
 | **Sync** | `fdatasync` has returned for a group that includes the record | yes | **yes** | nothing |
 
@@ -76,7 +80,7 @@ The disk's `fdatasync` latency drifted between runs by a factor of several (a pr
 average sync latency of its own run, the individual runs are listed, and group commit is judged by
 *commits per sync*, which does not depend on how slow the disk is.
 
-#### E1: the D.1 setup, 8 readers, writer asked for 50,000 puts/s
+### E1: the D.1 setup, 8 readers, writer asked for 50,000 puts/s
 
 | log | reads/s (M) | read p99 (ns) | read p999 (ns) | writer puts/s | put p50 (us) | put p99 (us) | put max (us) | syncs/s | avg sync (us) |
 |---|---|---|---|---|---|---|---|---|---|
@@ -85,7 +89,7 @@ average sync latency of its own run, the individual runs are listed, and group c
 | write | 119.3 | 160 | 260 | 50000 | 1.49 | 3.07 | 159 | 314 | 2130 |
 | sync | 124.8 | 78 | 188 | 2535 | 225.28 | 1540.10 | 6871 | 2535 | 392 |
 
-#### E2: one committer flat out, 0 readers running
+### E2: one committer flat out, 0 readers running
 
 | log | keys per txn | commits/s (k) | keys/s (k) | commit p50 (us) | commit p99 (us) | commit max (us) | syncs/s | avg sync (us) | reader reads/s (M) | runs: commits/s (k) |
 |---|---|---|---|---|---|---|---|---|---|---|
@@ -102,7 +106,7 @@ average sync latency of its own run, the individual runs are listed, and group c
 | sync | 4 | 2.5 | 9.8 | 215.04 | 2080.77 | 6878 | 2455 | 405 | 0.0 | 1.0, 4.3, 2.5 |
 | sync | 16 | 0.9 | 13.8 | 1490.94 | 3112.96 | 6879 | 862 | 1140 | 0.0 | 0.9, 3.8, 0.9 |
 
-#### E2: one committer flat out, 8 readers running
+### E2: one committer flat out, 8 readers running
 
 | log | keys per txn | commits/s (k) | keys/s (k) | commit p50 (us) | commit p99 (us) | commit max (us) | syncs/s | avg sync (us) | reader reads/s (M) | runs: commits/s (k) |
 |---|---|---|---|---|---|---|---|---|---|---|
@@ -119,7 +123,7 @@ average sync latency of its own run, the individual runs are listed, and group c
 | sync | 4 | 4.1 | 16.4 | 227.33 | 512.00 | 7053 | 4102 | 239 | 124.9 | 3.2, 4.2, 4.1 |
 | sync | 16 | 3.4 | 53.8 | 233.47 | 1277.95 | 15776 | 3363 | 284 | 121.4 | 2.9, 3.5, 3.4 |
 
-#### E3: group commit, Sync level, 1-key transactions, committers flat out
+### E3: group commit, Sync level, 1-key transactions, committers flat out
 
 | group delay (us) | committers | commits/s (k) | syncs/s | commits per sync | avg sync (us) | commit p50 (us) | commit p99 (us) | aborted | runs: commits/s (k) |
 |---|---|---|---|---|---|---|---|---|---|
@@ -179,18 +183,21 @@ fdatasync probe before each run: min 228 us, median 432 us, max 1315 us over 120
 |---|---|
 | `wal_test`: round trip at every level (puts, overwrites, erases, heap-backed values, transactions, a refused transaction that must not be logged, index) | reopened state equals an oracle exactly |
 | truncation: the file cut at every byte of its last 3 records and at 150 random places | **877 cuts**, each recovers exactly the complete records before the cut, and reports no valid records after it (a torn tail) |
-| corruption: random bit flips anywhere in the records | **600 flips**, each stops replay at exactly the damaged record, leaves the state of the records before it, and reports the number of valid records it had to drop after it |
-| sequence: a record removed, a record repeated | caught by the sequence numbers at every tried position |
+| corruption: random bit flips anywhere in the records | **600 flips**. Damage with valid records after it is refused and the file is byte-for-byte unchanged; with `repair` every flip stops replay at exactly the damaged record, leaves the state of the records before it, and reports how many valid records it dropped. Damage in the last record is an ordinary torn tail and opens |
+| sequence: a record removed, a record repeated | caught by the sequence numbers at every tried position (refused by default, replayed up to the gap with `repair`) |
+| failed opens: a file that is not a log, a log refused for corruption | the file is untouched afterwards (this test found a bug: the half-opened log's destructor truncated the file) |
 | continue: recover from a torn tail, append, reopen | the new records are replayed, and the file is clean |
 | group commit: 8 threads x 150 transactions at Sync | every commit present after reopen, syncs shared between commits |
-| `crash_test`: a child process commits 8-key transactions flat out and is **killed with `SIGKILL`** at a random moment, 40 times per level, appending to the same log across kills | Write: 578,989 commits, **0 acknowledged commits lost**. Sync: 8,569 commits, **0 lost**. Async: lost acknowledged commits in 12 of 40 runs, at worst 4,993 commits (about 17 ms of work; an earlier run at a slow moment of the disk lost up to 16,535, about 60 ms), and 2 kills left a genuinely torn tail that recovery detected and dropped. In every run of every level the 8 keys came back whole, with one version |
+| `crash_test`: a child process commits 8-key transactions flat out and is **killed with `SIGKILL`** at a random moment, 40 times per level, appending to the same log across kills | Write: 405,015 commits, **0 acknowledged commits lost**. Sync: 7,647 commits, **0 lost**. Async: lost acknowledged commits in 10 of 40 runs, at worst 4,133 commits (about 19 ms of work; earlier runs at slow moments of the disk lost up to 16,535, about 60 ms). Earlier runs of the same test also left genuinely torn tails (3 and 4 of 40 kills) that recovery detected and dropped; this run happened to leave none. In every run of every level the 8 keys came back whole, with one version |
+| `crash_test`, **simulated power loss**: after each kill, the log beyond the offset that had been `fdatasync`ed is damaged (dropped, cut mid-record, overwritten with random bytes, or a 4 KB page zeroed while later pages survive), 40 runs per level and per kind of damage | **Sync: 0 acknowledged commits lost in all 160 runs**, all of which had unsynced data to damage, for all four kinds of damage (the hole case needs `repair`, since it looks like corruption in the middle). Write lost up to 4,507 commits (about 24 ms at that rate) and Async up to 34,459, both only their unsynced window, and in every run, at every level, the 8 keys came back whole |
 | sanitizers | `make check`: AddressSanitizer and UBSan on the log tests, the transaction tests and the crash test; ThreadSanitizer on the log tests |
 
-What these tests cannot show: **a power cut**. `kill -9` cannot take back what the kernel already has,
-which is exactly why the Write level survives it, and we have no way to cut power or fail a disk here.
-For power loss the evidence is the design (`fdatasync` before the acknowledgement, in a preallocated
-file, with the directory entry synced) rather than a test. The truncation and bit-flip sweeps are the
-stand-in for the torn and damaged writes a power cut can leave behind.
+What these tests cannot show: **a real power cut on real hardware**. `kill -9` cannot take back what the
+kernel already has, which is why the Write level survives it. For power loss we simulate the usual model of
+a disk, in which data that was `fdatasync`ed is safe and anything after it may be lost or torn (the
+simulated power-loss row above), and the Sync level passes it. We have no way to cut power here or to
+make a disk lie about a flush, so the part the simulation cannot cover is a disk or controller that breaks
+that model.
 
 ## 5. What is still missing before this could run on a real desk
 
@@ -199,12 +206,13 @@ stand-in for the torn and damaged writes a power cut can leave behind.
   out), then truncation or rotation of the log segments before them.
 - **One machine, no replication.** If the disk or the box dies the data and the service are gone. A desk
   needs a replicated log with automatic failover, which is much of what TigerBeetle actually is.
-- **Detection without repair.** A damaged record in the middle of the log makes us drop it *and every
-  acknowledged commit after it*. We now report how many valid records that threw away, but a production
-  system should refuse to start and repair from a replica or a second copy of the log, and should keep
-  redundant headers and checksum every sector, not just every record.
-- **Power loss and disk faults are untested**: no fault-injection rig, no test of lying or reordering
-  disks, no `ENOSPC` handling beyond failing the log, no scrubbing of data at rest.
+- **Detection without repair.** Damage in the middle of the log is now refused rather than silently
+  dropped, and the number of valid records at risk is reported, but nothing can repair it: there is no
+  second copy of the log or replica to copy the missing range from. A production system should keep
+  redundant headers and checksum every sector, not just every record, and repair from a replica.
+- **Real power loss and disk faults are untested**: the power-loss test is a simulation of the usual disk
+  model, not a rig that cuts power or a disk that lies about a flush. There is no `ENOSPC` handling beyond
+  failing the log and no scrubbing of data at rest.
 - **The first sync of a failing disk may already have lost data**; we stop but cannot recover from it.
 - **Latency is not yet deterministic.** The writer allocates and frees memory on the hot path, the
   reclamation pass and the log's `posix_fallocate` can take milliseconds now and then, and nothing is
