@@ -1,0 +1,7 @@
+kvstore_test: all passed
+stress_test: PASS
+stress_test: PASS
+index: 150103 writes, 17444 snapshot-vs-scan comparisons, 0 mismatches
+txn_test: all passed
+index: 78810 writes, 8975 snapshot-vs-scan comparisons, 0 mismatches
+txn_test: all passed

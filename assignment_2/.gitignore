@@ -1,0 +1,8 @@
+pass.txt
+*.o
+*.zip
+build/
+bin/
+FlameGraph/
+*.data
+*.data.old

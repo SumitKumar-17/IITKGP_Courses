@@ -1,0 +1,822 @@
+--- partB/kvstore.h
++++ partC/kvstore.h
+@@ -1,27 +1,34 @@
+-// kvstore.h (Part B)
++// kvstore.h (Part C)
+ //
+-// RCU version of the store. The table is an immutable radix trie (64-way
+-// inner nodes, small leaves holding a few inline entries). A write copies the
+-// nodes on the path to the changed leaf, links them into a new Version, and
+-// publishes it with one atomic store of current_. A read announces itself in
+-// the epoch table, loads current_ once, and works on that version only.
+-// Replaced nodes go on a retire list and are freed by bounded reclamation
+-// passes once no reader can still be inside an older epoch.
++// Same RCU store as Part B, extended with
++//   * Transaction: staged writes published as ONE new version,
++//   * a secondary index (a second trie in the same Version, so a commit
++//     publishes table and index together),
++//   * Snapshot: a move-only handle that pins versions for many calls,
++//   * keys(): enumerate the primary keys of a snapshot.
+ //
+-// There is no lock on the read path. Writers are serialised by a mutex that
+-// readers never touch; the design target is a single writer thread.
++// A version is {primary trie, index trie, count}. Writers copy the path they
++// change in either trie, then publish with one atomic store of current_.
++// Readers announce an epoch, load current_ once and never take a lock.
+ #pragma once
+ #include <atomic>
+ #include <cstddef>
+ #include <cstdint>
+ #include <mutex>
+-#include <string>
+-#include <utility>
+ #include <vector>
+ 
++namespace nova_detail { struct EpochSlot; }
++
++struct StagedWrite {
++    long key;
++    size_t offset;   // into the transaction's byte buffer
++    size_t len;
++};
++
+ class alignas(64) KVStore {
+ public:
+-    // Appendix A interface in this part: put, get, erase, set_reclaim_batch. Methods marked "extra"
++    // Appendix A interface: put, get, erase, set_reclaim_batch, create_index, index_get, Snapshot,
++    // acquire_snapshot and the snapshot overloads of get, index_get and keys. Methods marked "extra"
+     // are additions for the tests and benchmarks.
+     KVStore();
+     ~KVStore();
+@@ -32,41 +39,91 @@
+     bool get(long key, void* value_out, size_t value_out_len) const;
+     bool erase(long key);
+ 
+-    // Most retired versions one reclamation pass may free. 0 turns
+-    // reclamation off (nothing is ever freed until the store is destroyed).
++    // Most retired versions one reclamation pass may free; 0 turns it off.
+     void set_reclaim_batch(int n);
+ 
+     struct ReclaimStats {
+-        uint64_t retired;         // versions retired so far
+-        uint64_t freed;           // versions freed so far
+-        uint64_t backlog_peak;    // largest retired - freed seen
+-        uint64_t passes;          // passes that freed something
+-        uint64_t max_pass_freed;  // most versions freed by a single pass
+-        uint64_t max_pass_ns;     // longest single pass
++        uint64_t retired;
++        uint64_t freed;
++        uint64_t backlog_peak;
++        uint64_t passes;
++        uint64_t max_pass_freed;
++        uint64_t max_pass_ns;
+     };
+     // extra, not in Appendix A
+     ReclaimStats reclaim_stats() const;
++    // Frees every retired version no reader can still need, with no bound. Meant for
++    // tests and for the stop-the-world comparison in Part D; the normal path is the
++    // bounded pass. Returns how many versions it freed.
++    // extra, not in Appendix A
++    size_t reclaim_all();
+ 
+     // extra, not in Appendix A
+     size_t size() const;
+ 
+-    // The workload generator is written against the full API, so these exist
+-    // here to let it link. Secondary indexes arrive in Part C.
++    // Builds a hash index over the bytes [field_offset, field_offset + field_len)
++    // of every stored value, and keeps it up to date from then on. One index per
++    // store, field_len at most 40. Returns false if one exists already.
+     bool create_index(size_t field_offset, size_t field_len);
++    // Primary keys whose indexed field equals the given bytes (up to max_keys).
+     int index_get(const void* field_value, size_t field_len, long* keys_out, int max_keys) const;
+ 
+-private:
+     struct Version;
++
++    // A handle on published versions. While it is alive the versions it has
++    // seen stay pinned against reclamation, across any number of calls.
++    //
++    // It pins the store it came from at acquire time. Used with another store,
++    // it pins that store's current version the first time it is used there and
++    // keeps that one from then on (a join over two tables uses one handle for
++    // both). Up to four stores per handle. Use one handle from one thread.
++    class Snapshot {
++    public:
++        Snapshot(Snapshot&&) noexcept;
++        Snapshot& operator=(Snapshot&&) noexcept;
++        ~Snapshot();
++        Snapshot(const Snapshot&) = delete;
++        Snapshot& operator=(const Snapshot&) = delete;
++
++    private:
++        friend class KVStore;
++        Snapshot() = default;
++        void release();
++
++        static constexpr int kMaxStores = 4;
++        struct Binding { const KVStore* store; const Version* version; };
++
++        nova_detail::EpochSlot* slot_ = nullptr;
++        mutable Binding bound_[kMaxStores] = {};
++        mutable int nbound_ = 0;
++    };
++
++    Snapshot acquire_snapshot() const;
++    bool get(const Snapshot& snap, long key, void* value_out, size_t value_out_len) const;
++    int index_get(const Snapshot& snap, const void* field_value, size_t field_len,
++                  long* keys_out, int max_keys) const;
++    size_t keys(const Snapshot& snap, long* keys_out, size_t max_keys) const;
++
++private:
++    friend class Transaction;
+     struct Garbage;
++    struct Build;
+ 
+-    void publish(Version* old, uintptr_t root, long delta);
++    const Version* bound(const Snapshot& snap) const;
++    void apply_put(Build& b, long key, const void* value, size_t len);
++    void apply_erase(Build& b, long key);
++    bool commit_writes(const std::vector<StagedWrite>& writes, const std::vector<char>& data,
++                       uint64_t start_seq);
++    void publish(Version* old, const Build& b);
++    size_t free_records(uint64_t limit);
+     void reclaim_pass();
+ 
+-    // Layout: readers only ever touch current_, so it gets a cache line to itself.
+-    // Everything the writer changes on each publish (lock, retire list, counters)
+-    // lives on other lines; otherwise every put would also invalidate the line
+-    // readers load the version pointer from.
++    // Layout: readers only ever touch current_ (and index_len_, written once), so
++    // they get a cache line to themselves. Everything the writer changes on each
++    // publish (lock, retire list, counters) lives on other lines; otherwise every
++    // put would also invalidate the line readers load the version pointer from.
+     alignas(64) std::atomic<Version*> current_;
++    std::atomic<size_t> index_len_{0};   // read by index_get without the writer lock
+ 
+     alignas(64) std::mutex write_mu_;
+ 
+@@ -75,32 +132,39 @@
+     Garbage* gc_head_ = nullptr;
+     Garbage* gc_tail_ = nullptr;
+     uint64_t build_seq_ = 0;
++    size_t index_off_ = 0;
++    bool has_index_ = false;
++
++    std::atomic<uint64_t> commit_seq_{0};   // sequence number of the newest published version
+ 
+     std::atomic<int> batch_;
+     std::atomic<uint64_t> retired_{0}, freed_{0}, backlog_peak_{0};
+     std::atomic<uint64_t> passes_{0}, max_pass_freed_{0}, max_pass_ns_{0};
+ };
+ 
+-// In Part B a transaction still just batches puts and applies them in order
+-// on commit. It becomes atomic towards readers in Part C.
++// put() only stages; commit() applies every staged write to one new version
++// and publishes it with a single pointer swap, so a reader sees all of them or
++// none. A Transaction destroyed without commit() drops what it staged.
++//
++// A transaction starts at a commit sequence number: the newest version when it
++// was created, or the version of the Snapshot passed in (use that form when the
++// writes depend on what was read through the snapshot). commit() applies the
++// first-committer-wins rule: if any key it writes was committed by someone else
++// after that start, nothing is published and commit() returns false.
+ class Transaction {
+ public:
+-    explicit Transaction(KVStore& store) : store_(store) {}
++    explicit Transaction(KVStore& store);
++    Transaction(KVStore& store, const KVStore::Snapshot& start);
+     ~Transaction() = default;
+     Transaction(const Transaction&) = delete;
+     Transaction& operator=(const Transaction&) = delete;
+ 
+-    void put(long key, const void* value, size_t value_len) {
+-        staged_.emplace_back(key, std::string(static_cast<const char*>(value), value_len));
+-    }
+-    bool commit() {
+-        bool ok = true;
+-        for (auto& w : staged_) ok &= store_.put(w.first, w.second.data(), w.second.size());
+-        staged_.clear();
+-        return ok;
+-    }
++    void put(long key, const void* value, size_t value_len);
++    bool commit();
+ 
+ private:
+     KVStore& store_;
+-    std::vector<std::pair<long, std::string>> staged_;
++    std::vector<StagedWrite> writes_;
++    std::vector<char> data_;
++    uint64_t start_seq_;
+ };
+--- partB/kvstore.cpp
++++ partC/kvstore.cpp
+@@ -1,4 +1,4 @@
+-// kvstore.cpp (Part B)
++// kvstore.cpp (Part C)
+ #include "kvstore.h"
+ 
+ #include <chrono>
+@@ -7,13 +7,29 @@
+ #include <cstring>
+ #include <new>
+ 
++namespace nova_detail {
++
++constexpr uint64_t kIdle = ~uint64_t(0);
++
++struct alignas(64) EpochSlot {
++    std::atomic<uint64_t> epoch{kIdle};
++    std::atomic<bool> used{false};
++};
++
++}  // namespace nova_detail
++
+ namespace {
+ 
++using nova_detail::EpochSlot;
++using nova_detail::kIdle;
++
+ constexpr int kFanBits = 6;
+ constexpr int kFan = 1 << kFanBits;
+ constexpr uint32_t kLeafCap = 8;
+ constexpr int kMaxDepth = 9;       // 10 chunks of 6 bits fit in a 64-bit hash
+ constexpr size_t kInline = 40;
++constexpr int kIndexPrefixDepth = 5;                    // 5 chunks = 30 bits of field hash
++constexpr uint64_t kPkMask = (uint64_t(1) << 34) - 1;   // low 34 bits come from the primary key
+ 
+ inline uint64_t mix(uint64_t x) {
+     x ^= x >> 30; x *= 0xbf58476d1ce4e5b9ULL;
+@@ -51,20 +67,43 @@
+ inline Node* as_node(uintptr_t p) { return reinterpret_cast<Node*>(p); }
+ inline uintptr_t tag(Leaf* l) { return reinterpret_cast<uintptr_t>(l) | 1; }
+ 
++inline const char* bytes(const Val& v) { return v.len > kInline ? v.heap : v.d; }
++
++// -------------------------------------------------------- how entries route
++//
++// The primary trie is routed by a hash of the key. The index trie holds one
++// entry per row, keyed by the row's primary key but routed by the indexed
++// field: the top 30 bits come from a hash of the field bytes, so every row
++// with the same field value sits under the same depth-5 node and a lookup is
++// one short descent plus a walk of that subtree.
++
++enum class Kind { Primary, Index };
++
++uint64_t hash_bytes(const void* p, size_t n) {
++    const unsigned char* b = static_cast<const unsigned char*>(p);
++    uint64_t h = 1469598103934665603ULL;
++    for (size_t i = 0; i < n; i++) { h ^= b[i]; h *= 1099511628211ULL; }
++    return mix(h);
++}
++
++inline uint64_t field_prefix(const void* field, size_t len) {
++    return (hash_bytes(field, len) >> 34) << 34;
++}
++
++inline uint64_t route(Kind kind, long key, const Val& v) {
++    if (kind == Kind::Primary) return mix(static_cast<uint64_t>(key));
++    return field_prefix(bytes(v), v.len) | (mix(static_cast<uint64_t>(key)) & kPkMask);
++}
++
+ // ------------------------------------------------------------- epoch table
+ //
+-// One slot per reader (or per pinned snapshot). A slot holds the global epoch
+-// the reader saw when it started, or kIdle. The table is shared by every
+-// store in the process, which is conservative but keeps readers to one slot.
++// One slot per reader thread, plus one per live Snapshot. A slot holds the
++// global epoch the reader saw when it started, or kIdle. The table is shared
++// by every store in the process, which is conservative but keeps a reader to
++// a single slot.
+ 
+-constexpr uint64_t kIdle = ~uint64_t(0);
+ constexpr int kMaxSlots = 1024;
+ 
+-struct alignas(64) EpochSlot {
+-    std::atomic<uint64_t> epoch{kIdle};
+-    std::atomic<bool> used{false};
+-};
+-
+ EpochSlot g_slots[kMaxSlots];
+ std::atomic<int> g_slot_hwm{0};
+ std::atomic<uint64_t> g_epoch{1};
+@@ -77,17 +116,18 @@
+         while (hwm < i + 1 && !g_slot_hwm.compare_exchange_weak(hwm, i + 1)) {}
+         return &g_slots[i];
+     }
+-    std::fprintf(stderr, "kvstore: more than %d concurrent readers\n", kMaxSlots);
++    std::fprintf(stderr, "kvstore: more than %d concurrent readers and snapshots\n", kMaxSlots);
+     std::abort();
+ }
+ 
++void release_slot(EpochSlot* s) {
++    s->epoch.store(kIdle, std::memory_order_release);
++    s->used.store(false);
++}
++
+ struct SlotHolder {
+     EpochSlot* slot = nullptr;
+-    ~SlotHolder() {
+-        if (!slot) return;
+-        slot->epoch.store(kIdle, std::memory_order_release);
+-        slot->used.store(false);
+-    }
++    ~SlotHolder() { if (slot) release_slot(slot); }
+ };
+ 
+ EpochSlot* my_slot() {
+@@ -96,13 +136,15 @@
+     return h.slot;
+ }
+ 
+-// Announces the reader. The exchange is a full barrier, so the announcement
+-// is globally visible before the caller loads the version pointer.
++// The exchange is a full barrier, so the announcement is globally visible
++// before the caller loads the version pointer.
++inline void announce(EpochSlot* s) {
++    s->epoch.exchange(g_epoch.load(std::memory_order_relaxed), std::memory_order_seq_cst);
++}
++
+ struct ReadGuard {
+     EpochSlot* s;
+-    ReadGuard() : s(my_slot()) {
+-        s->epoch.exchange(g_epoch.load(std::memory_order_relaxed), std::memory_order_seq_cst);
+-    }
++    ReadGuard() : s(my_slot()) { announce(s); }
+     ~ReadGuard() { s->epoch.store(kIdle, std::memory_order_release); }
+ };
+ 
+@@ -123,7 +165,7 @@
+ // -------------------------------------------------------------- read side
+ 
+ const Val* find(uintptr_t root, long key) {
+-    uint64_t h = mix(key);
++    uint64_t h = mix(static_cast<uint64_t>(key));
+     uintptr_t p = root;
+     for (int d = 0; p && !is_leaf(p); d++) p = as_node(p)->c[chunk(h, d)];
+     if (!p) return nullptr;
+@@ -135,7 +177,48 @@
+ }
+ 
+ void copy_out(const Val& v, void* out, size_t cap) {
+-    std::memcpy(out, v.len > kInline ? v.heap : v.d, v.len < cap ? v.len : cap);
++    std::memcpy(out, bytes(v), v.len < cap ? v.len : cap);
++}
++
++struct Collector {
++    long* out;
++    size_t max;
++    size_t n = 0;
++    bool full() const { return n >= max; }
++};
++
++void collect_keys(uintptr_t p, Collector& c) {
++    if (!p || c.full()) return;
++    if (is_leaf(p)) {
++        const Leaf* l = as_leaf(p);
++        for (uint32_t i = 0; i < l->n && !c.full(); i++) c.out[c.n++] = keys(l)[i];
++        return;
++    }
++    const Node* n = as_node(p);
++    for (int i = 0; i < kFan && !c.full(); i++) collect_keys(n->c[i], c);
++}
++
++void collect_postings(uintptr_t p, const void* field, size_t len, Collector& c) {
++    if (!p || c.full()) return;
++    if (is_leaf(p)) {
++        const Leaf* l = as_leaf(p);
++        for (uint32_t i = 0; i < l->n && !c.full(); i++) {
++            const Val& v = vals(l)[i];
++            if (v.len == len && std::memcmp(v.d, field, len) == 0) c.out[c.n++] = keys(l)[i];
++        }
++        return;
++    }
++    const Node* n = as_node(p);
++    for (int i = 0; i < kFan && !c.full(); i++) collect_postings(n->c[i], field, len, c);
++}
++
++size_t lookup_postings(uintptr_t iroot, const void* field, size_t len, long* out, size_t max) {
++    uint64_t h = field_prefix(field, len);
++    uintptr_t p = iroot;
++    for (int d = 0; p && !is_leaf(p) && d < kIndexPrefixDepth; d++) p = as_node(p)->c[chunk(h, d)];
++    Collector c{out, max};
++    collect_postings(p, field, len, c);
++    return c.n;
+ }
+ 
+ // ------------------------------------------------------------- write side
+@@ -143,6 +226,7 @@
+ struct Ctx {
+     uint64_t build;                // identifies nodes created by this write
+     std::vector<void*>& retired;   // replaced objects, freed later
++    Kind kind;
+ };
+ 
+ bool make_val(Val& v, const void* src, size_t len) {
+@@ -171,8 +255,9 @@
+ }
+ 
+ // A leaf or node made by this same write has not been published, so it can be
+-// changed in place and freed immediately. Anything else is copied and the
+-// original retired.
++// changed in place and freed immediately. That is also what lets several
++// writes in one transaction share one copied path. Anything else is copied
++// and the original retired.
+ Leaf* own(Leaf* o, Ctx& c, uint32_t cap) {
+     if (o->build == c.build && o->cap == cap) return o;
+     Leaf* l = new_leaf(c, cap);
+@@ -236,7 +321,7 @@
+     n->build = c.build;
+     bool unused = false;
+     for (uint32_t i = 0; i < on; i++) {
+-        uint64_t hh = mix(keys(o)[i]);
++        uint64_t hh = route(c.kind, keys(o)[i], vals(o)[i]);
+         int s = chunk(hh, d);
+         n->c[s] = insert(n->c[s], hh, d + 1, keys(o)[i], vals(o)[i], c, unused);
+     }
+@@ -247,7 +332,7 @@
+     return reinterpret_cast<uintptr_t>(n);
+ }
+ 
+-// The caller has already checked that the key is present.
++// The caller has already checked that the entry is present.
+ uintptr_t remove(uintptr_t p, uint64_t h, int d, long key, Ctx& c) {
+     if (!is_leaf(p)) {
+         Node* n = own(as_node(p), c);
+@@ -283,11 +368,36 @@
+     std::free(n);
+ }
+ 
++template <class F>
++void for_each_entry(uintptr_t p, F&& f) {
++    if (!p) return;
++    if (is_leaf(p)) {
++        const Leaf* l = as_leaf(p);
++        for (uint32_t i = 0; i < l->n; i++) f(keys(l)[i], vals(l)[i]);
++        return;
++    }
++    const Node* n = as_node(p);
++    for (int i = 0; i < kFan; i++) for_each_entry(n->c[i], f);
++}
++
++template <class T>
++T* alloc_version(uintptr_t root, uintptr_t iroot, long count, uint64_t seq) {
++    T* v = static_cast<T*>(std::malloc(sizeof(T)));
++    if (!v) throw std::bad_alloc();
++    v->root = root;
++    v->iroot = iroot;
++    v->count = count;
++    v->seq = seq;
++    return v;
++}
++
+ }  // namespace
+ 
+ struct KVStore::Version {
+     uintptr_t root;
++    uintptr_t iroot;
+     long count;
++    uint64_t seq;          // commit sequence number, 0 for the empty store
+ };
+ 
+ // Everything the writer replaced while making one version.
+@@ -298,22 +408,25 @@
+     void* p[];
+ };
+ 
+-namespace {
+-template <class T>
+-T* alloc_version(uintptr_t root, long count) {
+-    T* v = static_cast<T*>(std::malloc(sizeof(T)));
+-    if (!v) throw std::bad_alloc();
+-    v->root = root;
+-    v->count = count;
+-    return v;
+-}
+-}  // namespace
++// A version under construction: the roots as they stand after the writes so
++// far. Nothing in it is visible to readers until publish().
++struct KVStore::Build {
++    uintptr_t root;
++    uintptr_t iroot;
++    long delta = 0;
++    uint32_t stamp;                // commit sequence (low 32 bits) written into every row of this build
++    Ctx pc, ic;
++    Build(const Version* base, uint64_t id, std::vector<void*>& retired)
++        : root(base->root), iroot(base->iroot), stamp(static_cast<uint32_t>(base->seq + 1)),
++          pc{id, retired, Kind::Primary}, ic{id, retired, Kind::Index} {}
++};
+ 
+-KVStore::KVStore() : current_(alloc_version<Version>(0, 0)), batch_(64) {}
++KVStore::KVStore() : current_(alloc_version<Version>(0, 0, 0, 0)), batch_(64) {}
+ 
+ KVStore::~KVStore() {
+     Version* v = current_.load();
+     free_tree(v->root);
++    free_tree(v->iroot);
+     std::free(v);
+     while (gc_head_) {
+         Garbage* g = gc_head_;
+@@ -331,6 +444,8 @@
+             max_pass_freed_.load(), max_pass_ns_.load()};
+ }
+ 
++// -------------------------------------------------------------- readers
++
+ bool KVStore::get(long key, void* value_out, size_t value_out_len) const {
+     ReadGuard guard;
+     const Version* v = current_.load(std::memory_order_seq_cst);
+@@ -345,15 +460,151 @@
+     return static_cast<size_t>(current_.load(std::memory_order_seq_cst)->count);
+ }
+ 
++int KVStore::index_get(const void* field_value, size_t field_len, long* keys_out, int max_keys) const {
++    if (max_keys <= 0) return 0;
++    ReadGuard guard;
++    const Version* v = current_.load(std::memory_order_seq_cst);
++    if (!v->iroot || field_len != index_len_.load(std::memory_order_relaxed)) return 0;
++    return static_cast<int>(lookup_postings(v->iroot, field_value, field_len, keys_out, max_keys));
++}
++
++// ------------------------------------------------------------- snapshots
++
++KVStore::Snapshot::Snapshot(Snapshot&& o) noexcept
++    : slot_(o.slot_), nbound_(o.nbound_) {
++    for (int i = 0; i < kMaxStores; i++) bound_[i] = o.bound_[i];
++    o.slot_ = nullptr;
++    o.nbound_ = 0;
++}
++
++KVStore::Snapshot& KVStore::Snapshot::operator=(Snapshot&& o) noexcept {
++    if (this == &o) return *this;
++    release();
++    slot_ = o.slot_;
++    nbound_ = o.nbound_;
++    for (int i = 0; i < kMaxStores; i++) bound_[i] = o.bound_[i];
++    o.slot_ = nullptr;
++    o.nbound_ = 0;
++    return *this;
++}
++
++KVStore::Snapshot::~Snapshot() { release(); }
++
++void KVStore::Snapshot::release() {
++    if (slot_) release_slot(slot_);
++    slot_ = nullptr;
++    nbound_ = 0;
++}
++
++KVStore::Snapshot KVStore::acquire_snapshot() const {
++    Snapshot s;
++    s.slot_ = claim_slot();
++    announce(s.slot_);
++    s.bound_[0] = {this, current_.load(std::memory_order_seq_cst)};
++    s.nbound_ = 1;
++    return s;
++}
++
++// The slot was announced when the snapshot was made, so any version that is
++// current now is retired no earlier than that epoch and stays pinned.
++const KVStore::Version* KVStore::bound(const Snapshot& snap) const {
++    for (int i = 0; i < snap.nbound_; i++)
++        if (snap.bound_[i].store == this) return snap.bound_[i].version;
++    if (snap.nbound_ == Snapshot::kMaxStores) {
++        std::fprintf(stderr, "kvstore: a Snapshot can span at most %d stores\n", Snapshot::kMaxStores);
++        std::abort();
++    }
++    const Version* v = current_.load(std::memory_order_seq_cst);
++    snap.bound_[snap.nbound_++] = {this, v};
++    return v;
++}
++
++bool KVStore::get(const Snapshot& snap, long key, void* value_out, size_t value_out_len) const {
++    const Val* val = find(bound(snap)->root, key);
++    if (!val) return false;
++    copy_out(*val, value_out, value_out_len);
++    return true;
++}
++
++int KVStore::index_get(const Snapshot& snap, const void* field_value, size_t field_len,
++                       long* keys_out, int max_keys) const {
++    if (max_keys <= 0) return 0;
++    const Version* v = bound(snap);
++    if (!v->iroot || field_len != index_len_.load(std::memory_order_relaxed)) return 0;
++    return static_cast<int>(lookup_postings(v->iroot, field_value, field_len, keys_out, max_keys));
++}
++
++size_t KVStore::keys(const Snapshot& snap, long* keys_out, size_t max_keys) const {
++    Collector c{keys_out, max_keys};
++    collect_keys(bound(snap)->root, c);
++    return c.n;
++}
++
++// ---------------------------------------------------------------- writers
++
++// Applies one write to the build. The index entry for the row, if the store
++// has an index, moves along with it.
++void KVStore::apply_put(Build& b, long key, const void* value, size_t len) {
++    Val nv;
++    if (!make_val(nv, value, len)) throw std::bad_alloc();
++    nv.pad = b.stamp;
++
++    char old_field[kInline];
++    bool had_posting = false;
++    if (has_index_) {
++        const Val* old = find(b.root, key);
++        if (old && old->len >= index_off_ + index_len_) {
++            std::memcpy(old_field, bytes(*old) + index_off_, index_len_);
++            had_posting = true;
++        }
++    }
++
++    bool added = false;
++    b.root = insert(b.root, mix(static_cast<uint64_t>(key)), 0, key, nv, b.pc, added);
++    if (added) b.delta++;
++    if (!has_index_) return;
++
++    bool has_new = len >= index_off_ + index_len_;
++    const char* new_field = static_cast<const char*>(value) + index_off_;
++    bool same = had_posting && has_new && std::memcmp(old_field, new_field, index_len_) == 0;
++    if (same) return;
++
++    if (had_posting) {
++        Val ov;
++        ov.len = static_cast<uint32_t>(index_len_);
++        std::memcpy(ov.d, old_field, index_len_);
++        b.iroot = remove(b.iroot, route(Kind::Index, key, ov), 0, key, b.ic);
++    }
++    if (has_new) {
++        Val fv;
++        fv.len = static_cast<uint32_t>(index_len_);
++        fv.pad = 0;
++        std::memcpy(fv.d, new_field, index_len_);
++        bool dummy = false;
++        b.iroot = insert(b.iroot, route(Kind::Index, key, fv), 0, key, fv, b.ic, dummy);
++    }
++}
++
++void KVStore::apply_erase(Build& b, long key) {
++    const Val* old = find(b.root, key);
++    if (!old) return;
++    if (has_index_ && old->len >= index_off_ + index_len_) {
++        Val ov;
++        ov.len = static_cast<uint32_t>(index_len_);
++        std::memcpy(ov.d, bytes(*old) + index_off_, index_len_);
++        b.iroot = remove(b.iroot, route(Kind::Index, key, ov), 0, key, b.ic);
++    }
++    b.root = remove(b.root, mix(static_cast<uint64_t>(key)), 0, key, b.pc);
++    b.delta--;
++}
++
+ bool KVStore::put(long key, const void* value, size_t value_len) {
+-    Val v;
+-    if (!make_val(v, value, value_len)) return false;
++    if (value_len > UINT32_MAX) return false;
+     std::lock_guard<std::mutex> g(write_mu_);
+     Version* old = current_.load(std::memory_order_relaxed);
+-    Ctx c{++build_seq_, pending_};
+-    bool added = false;
+-    uintptr_t root = insert(old->root, mix(key), 0, key, v, c, added);
+-    publish(old, root, added ? 1 : 0);
++    Build b(old, ++build_seq_, pending_);
++    try { apply_put(b, key, value, value_len); } catch (const std::bad_alloc&) { return false; }
++    publish(old, b);
+     return true;
+ }
+ 
+@@ -361,18 +612,65 @@
+     std::lock_guard<std::mutex> g(write_mu_);
+     Version* old = current_.load(std::memory_order_relaxed);
+     if (!find(old->root, key)) return false;
+-    Ctx c{++build_seq_, pending_};
+-    uintptr_t root = remove(old->root, mix(key), 0, key, c);
+-    publish(old, root, -1);
++    Build b(old, ++build_seq_, pending_);
++    apply_erase(b, key);
++    publish(old, b);
++    return true;
++}
++
++bool KVStore::commit_writes(const std::vector<StagedWrite>& writes, const std::vector<char>& data,
++                            uint64_t start_seq) {
++    if (writes.empty()) return true;
++    std::lock_guard<std::mutex> g(write_mu_);
++    Version* old = current_.load(std::memory_order_relaxed);
++
++    // First committer wins: a row stamped after our start was written by a
++    // transaction that committed first. The difference is taken in 32 bits so
++    // the stamp may wrap.
++    for (const StagedWrite& w : writes) {
++        const Val* cur = find(old->root, w.key);
++        if (cur && static_cast<int32_t>(cur->pad - static_cast<uint32_t>(start_seq)) > 0) return false;
++    }
++
++    Build b(old, ++build_seq_, pending_);
++    try {
++        for (const StagedWrite& w : writes) apply_put(b, w.key, data.data() + w.offset, w.len);
++    } catch (const std::bad_alloc&) {
++        return false;
++    }
++    publish(old, b);
++    return true;
++}
++
++bool KVStore::create_index(size_t field_offset, size_t field_len) {
++    if (field_len == 0 || field_len > kInline) return false;
++    std::lock_guard<std::mutex> g(write_mu_);
++    if (has_index_) return false;
++    Version* old = current_.load(std::memory_order_relaxed);
++    Build b(old, ++build_seq_, pending_);
++    index_off_ = field_offset;
++    index_len_.store(field_len, std::memory_order_relaxed);
++    for_each_entry(old->root, [&](long key, const Val& v) {
++        if (v.len < field_offset + field_len) return;
++        Val fv;
++        fv.len = static_cast<uint32_t>(field_len);
++        fv.pad = 0;
++        std::memcpy(fv.d, bytes(v) + field_offset, field_len);
++        bool dummy = false;
++        b.iroot = insert(b.iroot, route(Kind::Index, key, fv), 0, key, fv, b.ic, dummy);
++    });
++    has_index_ = true;
++    publish(old, b);
+     return true;
+ }
+ 
+ // One atomic store makes the new version visible. The replaced objects are
+ // stamped with the epoch of the swap; a reader that could still hold the old
+ // version announced an epoch no later than that stamp.
+-void KVStore::publish(Version* old, uintptr_t root, long delta) {
+-    Version* nv = alloc_version<Version>(root, old->count + delta);
++void KVStore::publish(Version* old, const Build& b) {
++    Version* nv = alloc_version<Version>(b.root, b.iroot, old->count + b.delta, old->seq + 1);
+     current_.store(nv, std::memory_order_seq_cst);
++    commit_seq_.store(nv->seq, std::memory_order_release);
+     pending_.push_back(old);
+ 
+     Garbage* g = static_cast<Garbage*>(std::malloc(sizeof(Garbage) + pending_.size() * sizeof(void*)));
+@@ -393,18 +691,17 @@
+     reclaim_pass();
+ }
+ 
+-// Frees at most batch_ retired versions, oldest first, and only those that no
++// Frees up to limit retired versions, oldest first, and only those that no
+ // reader can still be using. It never waits: a version that is still pinned
+ // just stays on the list for a later pass.
+-void KVStore::reclaim_pass() {
+-    int batch = batch_.load(std::memory_order_relaxed);
+-    if (batch <= 0 || !gc_head_) return;
++size_t KVStore::free_records(uint64_t limit) {
++    if (!gc_head_) return 0;
+     uint64_t floor = min_active_epoch();
+-    if (gc_head_->epoch >= floor) return;
++    if (gc_head_->epoch >= floor) return 0;
+ 
+     auto t0 = std::chrono::steady_clock::now();
+     uint64_t n = 0;
+-    while (gc_head_ && gc_head_->epoch < floor && n < static_cast<uint64_t>(batch)) {
++    while (gc_head_ && gc_head_->epoch < floor && n < limit) {
+         Garbage* g = gc_head_;
+         gc_head_ = g->next;
+         if (!gc_head_) gc_tail_ = nullptr;
+@@ -418,8 +715,38 @@
+     passes_.fetch_add(1, std::memory_order_relaxed);
+     if (n > max_pass_freed_.load(std::memory_order_relaxed)) max_pass_freed_.store(n, std::memory_order_relaxed);
+     if (ns > max_pass_ns_.load(std::memory_order_relaxed)) max_pass_ns_.store(ns, std::memory_order_relaxed);
++    return n;
+ }
+ 
+-bool KVStore::create_index(size_t, size_t) { return false; }
++void KVStore::reclaim_pass() {
++    int batch = batch_.load(std::memory_order_relaxed);
++    if (batch <= 0) return;
++    free_records(static_cast<uint64_t>(batch));
++}
+ 
+-int KVStore::index_get(const void*, size_t, long*, int) const { return 0; }
++size_t KVStore::reclaim_all() {
++    std::lock_guard<std::mutex> g(write_mu_);
++    return free_records(~uint64_t(0));
++}
++
++// ----------------------------------------------------------- transactions
++
++Transaction::Transaction(KVStore& store)
++    : store_(store), start_seq_(store.commit_seq_.load(std::memory_order_acquire)) {}
++
++Transaction::Transaction(KVStore& store, const KVStore::Snapshot& start)
++    : store_(store), start_seq_(store.bound(start)->seq) {}
++
++void Transaction::put(long key, const void* value, size_t value_len) {
++    writes_.push_back({key, data_.size(), value_len});
++    const char* p = static_cast<const char*>(value);
++    data_.insert(data_.end(), p, p + value_len);
++}
++
++bool Transaction::commit() {
++    bool ok = store_.commit_writes(writes_, data_, start_seq_);
++    writes_.clear();
++    data_.clear();
++    start_seq_ = store_.commit_seq_.load(std::memory_order_acquire);
++    return ok;
++}
