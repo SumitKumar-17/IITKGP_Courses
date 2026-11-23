@@ -1,0 +1,288 @@
+# ============================================================
+# Results for N = 1024
+# ============================================================
+row_major_1024.c:21:27: optimized: loop vectorized using 32 byte vectors
+# Row major results (-O0), N=1024
+Row-major traversal time: 0.001606 seconds
+Ignore: 524415.998540
+
+ Performance counter stats for './rmajor_1024_O0':
+
+          7,84,372      cpu_atom/cache-references/                                              (0.18%)
+          3,32,863      cpu_core/cache-references/                                              (99.82%)
+          1,84,623      cpu_atom/cache-misses/           #   23.54% of all cache refs           (0.18%)
+          1,69,521      cpu_core/cache-misses/           #   50.93% of all cache refs           (99.82%)
+
+       0.024291863 seconds time elapsed
+
+       0.022349000 seconds user
+       0.002031000 seconds sys
+
+
+# Row major results (-O3), N=1024
+Row-major traversal time: 0.000547 seconds
+Ignore: 524415.998540
+
+ Performance counter stats for './rmajor_1024_O3':
+
+     <not counted>      cpu_atom/cache-references/                                              (0.00%)
+          3,22,088      cpu_core/cache-references/                                            
+     <not counted>      cpu_atom/cache-misses/                                                  (0.00%)
+          1,24,571      cpu_core/cache-misses/           #   38.68% of all cache refs         
+
+       0.016196670 seconds time elapsed
+
+       0.013127000 seconds user
+       0.003029000 seconds sys
+
+
+# Column major results (-O0), N=1024
+Column-major traversal time: 0.004967 seconds
+Ignore: 524415.998540
+
+ Performance counter stats for './cmajor_1024_O0':
+
+     <not counted>      cpu_atom/cache-references/                                              (0.00%)
+         11,63,005      cpu_core/cache-references/                                            
+     <not counted>      cpu_atom/cache-misses/                                                  (0.00%)
+          1,98,436      cpu_core/cache-misses/           #   17.06% of all cache refs         
+
+       0.026541590 seconds time elapsed
+
+       0.021622000 seconds user
+       0.004914000 seconds sys
+
+
+# Column major results (-O3), N=1024
+Column-major traversal time: 0.002532 seconds
+Ignore: 524415.998540
+
+ Performance counter stats for './cmajor_1024_O3':
+
+     <not counted>      cpu_atom/cache-references/                                              (0.00%)
+         15,24,244      cpu_core/cache-references/                                            
+     <not counted>      cpu_atom/cache-misses/                                                  (0.00%)
+          2,14,678      cpu_core/cache-misses/           #   14.08% of all cache refs         
+
+       0.024222995 seconds time elapsed
+
+       0.022170000 seconds user
+       0.002015000 seconds sys
+
+
+# ============================================================
+# Results for N = 2048
+# ============================================================
+row_major_2048.c:21:27: optimized: loop vectorized using 32 byte vectors
+# Row major results (-O0), N=2048
+Row-major traversal time: 0.006412 seconds
+Ignore: 2097105.349518
+
+ Performance counter stats for './rmajor_2048_O0':
+
+     <not counted>      cpu_atom/cache-references/                                              (0.00%)
+         11,71,695      cpu_core/cache-references/                                            
+     <not counted>      cpu_atom/cache-misses/                                                  (0.00%)
+          7,21,443      cpu_core/cache-misses/           #   61.57% of all cache refs         
+
+       0.057641885 seconds time elapsed
+
+       0.047650000 seconds user
+       0.009927000 seconds sys
+
+
+# Row major results (-O3), N=2048
+Row-major traversal time: 0.002016 seconds
+Ignore: 2097105.349518
+
+ Performance counter stats for './rmajor_2048_O3':
+
+          5,81,824      cpu_atom/cache-references/                                              (10.52%)
+         12,39,430      cpu_core/cache-references/                                              (89.48%)
+          3,62,018      cpu_atom/cache-misses/           #   62.22% of all cache refs           (10.52%)
+          9,56,086      cpu_core/cache-misses/           #   77.14% of all cache refs           (89.48%)
+
+       0.056024236 seconds time elapsed
+
+       0.050008000 seconds user
+       0.006000000 seconds sys
+
+
+# Column major results (-O0), N=2048
+Column-major traversal time: 0.017860 seconds
+Ignore: 2097105.349518
+
+ Performance counter stats for './cmajor_2048_O0':
+
+          7,25,019      cpu_atom/cache-references/                                              (17.41%)
+         64,47,623      cpu_core/cache-references/                                              (82.59%)
+          4,81,287      cpu_atom/cache-misses/           #   66.38% of all cache refs           (17.41%)
+         18,33,752      cpu_core/cache-misses/           #   28.44% of all cache refs           (82.59%)
+
+       0.072281416 seconds time elapsed
+
+       0.064136000 seconds user
+       0.008017000 seconds sys
+
+
+# Column major results (-O3), N=2048
+Column-major traversal time: 0.036625 seconds
+Ignore: 2097105.349518
+
+ Performance counter stats for './cmajor_2048_O3':
+
+     <not counted>      cpu_atom/cache-references/                                              (0.00%)
+         50,95,818      cpu_core/cache-references/                                            
+     <not counted>      cpu_atom/cache-misses/                                                  (0.00%)
+         35,73,627      cpu_core/cache-misses/           #   70.13% of all cache refs         
+
+       0.086045518 seconds time elapsed
+
+       0.080890000 seconds user
+       0.004993000 seconds sys
+
+
+# ============================================================
+# Results for N = 4096
+# ============================================================
+row_major_4096.c:21:27: optimized: loop vectorized using 32 byte vectors
+# Row major results (-O0), N=4096
+Row-major traversal time: 0.025673 seconds
+Ignore: 8386732.607490
+
+ Performance counter stats for './rmajor_4096_O0':
+
+     <not counted>      cpu_atom/cache-references/                                              (0.00%)
+         46,09,354      cpu_core/cache-references/                                            
+     <not counted>      cpu_atom/cache-misses/                                                  (0.00%)
+         32,10,581      cpu_core/cache-misses/           #   69.65% of all cache refs         
+
+       0.226970887 seconds time elapsed
+
+       0.200952000 seconds user
+       0.025993000 seconds sys
+
+
+# Row major results (-O3), N=4096
+Row-major traversal time: 0.008297 seconds
+Ignore: 8386732.607490
+
+ Performance counter stats for './rmajor_4096_O3':
+
+     <not counted>      cpu_atom/cache-references/                                              (0.00%)
+         45,44,440      cpu_core/cache-references/                                            
+     <not counted>      cpu_atom/cache-misses/                                                  (0.00%)
+         40,95,572      cpu_core/cache-misses/           #   90.12% of all cache refs         
+
+       0.202323605 seconds time elapsed
+
+       0.174359000 seconds user
+       0.027897000 seconds sys
+
+
+# Column major results (-O0), N=4096
+Column-major traversal time: 0.155763 seconds
+Ignore: 8386732.607490
+
+ Performance counter stats for './cmajor_4096_O0':
+
+       1,69,11,260      cpu_atom/cache-references/                                              (0.03%)
+       2,22,61,751      cpu_core/cache-references/                                              (99.97%)
+         38,33,295      cpu_atom/cache-misses/           #   22.67% of all cache refs           (0.03%)
+       1,64,45,557      cpu_core/cache-misses/           #   73.87% of all cache refs           (99.97%)
+
+       0.352989026 seconds time elapsed
+
+       0.323958000 seconds user
+       0.028996000 seconds sys
+
+
+# Column major results (-O3), N=4096
+Column-major traversal time: 0.175271 seconds
+Ignore: 8386732.607490
+
+ Performance counter stats for './cmajor_4096_O3':
+
+         39,27,723      cpu_atom/cache-references/                                              (2.47%)
+       1,95,54,995      cpu_core/cache-references/                                              (97.53%)
+         31,35,108      cpu_atom/cache-misses/           #   79.82% of all cache refs           (2.47%)
+       1,68,27,564      cpu_core/cache-misses/           #   86.05% of all cache refs           (97.53%)
+
+       0.376771889 seconds time elapsed
+
+       0.342815000 seconds user
+       0.033981000 seconds sys
+
+
+# ============================================================
+# Results for N = 8192
+# ============================================================
+row_major_8192.c:21:27: optimized: loop vectorized using 32 byte vectors
+# Row major results (-O0), N=8192
+Row-major traversal time: 0.101449 seconds
+Ignore: 33551254.325231
+
+ Performance counter stats for './rmajor_8192_O0':
+
+     <not counted>      cpu_atom/cache-references/                                              (0.00%)
+       1,83,42,749      cpu_core/cache-references/                                            
+     <not counted>      cpu_atom/cache-misses/                                                  (0.00%)
+       1,32,04,944      cpu_core/cache-misses/           #   71.99% of all cache refs         
+
+       0.884507944 seconds time elapsed
+
+       0.771424000 seconds user
+       0.113062000 seconds sys
+
+
+# Row major results (-O3), N=8192
+Row-major traversal time: 0.032701 seconds
+Ignore: 33551254.325231
+
+ Performance counter stats for './rmajor_8192_O3':
+
+     <not counted>      cpu_atom/cache-references/                                              (0.00%)
+       1,82,68,237      cpu_core/cache-references/                                            
+     <not counted>      cpu_atom/cache-misses/                                                  (0.00%)
+       1,65,07,998      cpu_core/cache-misses/           #   90.36% of all cache refs         
+
+       0.806054655 seconds time elapsed
+
+       0.687958000 seconds user
+       0.117992000 seconds sys
+
+
+# Column major results (-O0), N=8192
+Column-major traversal time: 0.638773 seconds
+Ignore: 33551254.325232
+
+ Performance counter stats for './cmajor_8192_O0':
+
+       1,45,94,326      cpu_atom/cache-references/                                              (0.53%)
+       9,42,04,494      cpu_core/cache-references/                                              (99.47%)
+       1,28,63,753      cpu_atom/cache-misses/           #   88.14% of all cache refs           (0.53%)
+       6,96,43,875      cpu_core/cache-misses/           #   73.93% of all cache refs           (99.47%)
+
+       1.416697501 seconds time elapsed
+
+       1.308682000 seconds user
+       0.107973000 seconds sys
+
+
+# Column major results (-O3), N=8192
+Column-major traversal time: 0.732337 seconds
+Ignore: 33551254.325232
+
+ Performance counter stats for './cmajor_8192_O3':
+
+     <not counted>      cpu_atom/cache-references/                                              (0.00%)
+       7,74,11,968      cpu_core/cache-references/                                            
+     <not counted>      cpu_atom/cache-misses/                                                  (0.00%)
+       6,93,91,497      cpu_core/cache-misses/           #   89.64% of all cache refs         
+
+       1.497298830 seconds time elapsed
+
+       1.375219000 seconds user
+       0.122019000 seconds sys
+
+
