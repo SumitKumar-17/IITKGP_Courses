@@ -1,0 +1,21 @@
+# started on Sat Aug 15 02:06:17 2026
+
+
+ Performance counter stats for 'taskset -c 2 ./nogc testbench.lua':
+
+     <not counted>      cpu_atom/branch-misses/                                                 (0.00%)
+            78,058      cpu_core/branch-misses/                                               
+            47,047      page-faults                                                           
+     <not counted>      cpu_atom/cache-misses/                                                  (0.00%)
+         57,52,377      cpu_core/cache-misses/                                                
+     <not counted>      cpu_atom/instructions/                                                  (0.00%)
+    3,81,48,92,464      cpu_core/instructions/           #    3.44  insn per cycle            
+     <not counted>      cpu_atom/cycles/                                                        (0.00%)
+    1,11,01,83,443      cpu_core/cycles/                                                      
+
+       0.199000443 seconds time elapsed
+
+       0.149621000 seconds user
+       0.052866000 seconds sys
+
+

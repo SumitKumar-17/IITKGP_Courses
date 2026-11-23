@@ -1,0 +1,33 @@
+== run 1
+NSM      rows=100000   row-get   15.7 ns   symbol-only   13.4 ns   price-scan  0.38 ns/row   8-thread row-get   480.9 Mops/s
+DSM      rows=100000   row-get   18.6 ns   symbol-only    8.8 ns   price-scan  0.37 ns/row   8-thread row-get   387.6 Mops/s
+PAX-16   rows=100000   row-get   17.0 ns   symbol-only   13.3 ns   price-scan  0.51 ns/row   8-thread row-get   421.7 Mops/s
+PAX-64   rows=100000   row-get   16.6 ns   symbol-only   13.3 ns   price-scan  0.44 ns/row   8-thread row-get   428.4 Mops/s
+PAX-256  rows=100000   row-get   17.5 ns   symbol-only   10.3 ns   price-scan  0.38 ns/row   8-thread row-get   407.6 Mops/s
+NSM      rows=4000000  row-get  116.1 ns   symbol-only  113.4 ns   price-scan  1.92 ns/row   8-thread row-get    72.5 Mops/s
+DSM      rows=4000000  row-get  149.2 ns   symbol-only   61.4 ns   price-scan  0.59 ns/row   8-thread row-get    55.4 Mops/s
+PAX-16   rows=4000000  row-get  149.9 ns   symbol-only  111.9 ns   price-scan  2.29 ns/row   8-thread row-get    51.5 Mops/s
+PAX-64   rows=4000000  row-get  139.8 ns   symbol-only  111.3 ns   price-scan  1.92 ns/row   8-thread row-get    55.3 Mops/s
+PAX-256  rows=4000000  row-get  144.9 ns   symbol-only   90.9 ns   price-scan  1.07 ns/row   8-thread row-get    56.9 Mops/s
+== run 2
+NSM      rows=100000   row-get   17.6 ns   symbol-only   15.0 ns   price-scan  0.44 ns/row   8-thread row-get   413.1 Mops/s
+DSM      rows=100000   row-get   18.4 ns   symbol-only    8.8 ns   price-scan  0.37 ns/row   8-thread row-get   385.1 Mops/s
+PAX-16   rows=100000   row-get   17.0 ns   symbol-only   13.6 ns   price-scan  0.50 ns/row   8-thread row-get   416.0 Mops/s
+PAX-64   rows=100000   row-get   18.1 ns   symbol-only   14.7 ns   price-scan  0.49 ns/row   8-thread row-get   395.9 Mops/s
+PAX-256  rows=100000   row-get   17.7 ns   symbol-only   11.1 ns   price-scan  0.39 ns/row   8-thread row-get   395.7 Mops/s
+NSM      rows=4000000  row-get  117.3 ns   symbol-only  115.5 ns   price-scan  1.95 ns/row   8-thread row-get    72.8 Mops/s
+DSM      rows=4000000  row-get  151.2 ns   symbol-only   38.3 ns   price-scan  0.54 ns/row   8-thread row-get    55.1 Mops/s
+PAX-16   rows=4000000  row-get  147.4 ns   symbol-only  110.9 ns   price-scan  2.22 ns/row   8-thread row-get    51.4 Mops/s
+PAX-64   rows=4000000  row-get  140.8 ns   symbol-only  112.1 ns   price-scan  1.95 ns/row   8-thread row-get    55.2 Mops/s
+PAX-256  rows=4000000  row-get  146.5 ns   symbol-only   99.2 ns   price-scan  1.07 ns/row   8-thread row-get    56.8 Mops/s
+== run 3
+NSM      rows=100000   row-get   15.7 ns   symbol-only   12.7 ns   price-scan  0.46 ns/row   8-thread row-get   478.9 Mops/s
+DSM      rows=100000   row-get   19.6 ns   symbol-only    8.8 ns   price-scan  0.37 ns/row   8-thread row-get   363.6 Mops/s
+PAX-16   rows=100000   row-get   17.5 ns   symbol-only   14.1 ns   price-scan  0.47 ns/row   8-thread row-get   401.8 Mops/s
+PAX-64   rows=100000   row-get   17.8 ns   symbol-only   14.6 ns   price-scan  0.49 ns/row   8-thread row-get   397.7 Mops/s
+PAX-256  rows=100000   row-get   17.4 ns   symbol-only   10.5 ns   price-scan  0.42 ns/row   8-thread row-get   404.5 Mops/s
+NSM      rows=4000000  row-get  115.3 ns   symbol-only  115.8 ns   price-scan  1.99 ns/row   8-thread row-get    69.7 Mops/s
+DSM      rows=4000000  row-get  151.7 ns   symbol-only   38.8 ns   price-scan  0.50 ns/row   8-thread row-get    54.9 Mops/s
+PAX-16   rows=4000000  row-get  147.5 ns   symbol-only  111.9 ns   price-scan  2.28 ns/row   8-thread row-get    51.3 Mops/s
+PAX-64   rows=4000000  row-get  139.9 ns   symbol-only  111.4 ns   price-scan  1.90 ns/row   8-thread row-get    55.2 Mops/s
+PAX-256  rows=4000000  row-get  146.1 ns   symbol-only   92.6 ns   price-scan  1.02 ns/row   8-thread row-get    56.6 Mops/s

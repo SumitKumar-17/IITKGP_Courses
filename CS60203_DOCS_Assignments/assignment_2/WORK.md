@@ -1,0 +1,598 @@
+# WORK.md: how we actually did Assignment 2
+
+This is the private working log, not part of the submission (`submitter.sh` only packs
+`common/` and `part*/`). It is here so that anyone who has to redo or explain a step later can
+see what was done, why, with which command, and what was measured to justify it. The reports
+have the polished version. This has the story.
+
+---
+
+## 0. Setup
+
+**Goal of the assignment in one paragraph.** Build a small in-memory key-value store (NOVA-KV)
+for a trading desk. Readers must never wait. Part A builds a plain locked store and measures
+how bad locks are. Part B replaces locks with RCU (copy-on-write plus one pointer swap).
+Part C adds multi-key transactions and an index join on top of RCU. Part D benchmarks all of
+it. Part E is a bonus write-ahead log.
+
+**Where things run.** Everything that is compiled, benchmarked, profiled or turned into a PDF
+runs on the lab server `t1000@10.5.31.157` (passwordless ssh). The laptop only stores the
+sources and results and builds the zip. The server is an i9-13900K: 8 performance cores with
+hyperthreads (CPUs 0 to 15) plus 16 efficiency cores (CPUs 16 to 31). Because the machine is
+hybrid, every benchmark is pinned with `taskset -c 0-15` so a reader thread never lands on a
+slow efficiency core and skews the numbers.
+
+**The scripts.**
+
+| script | what it does |
+|---|---|
+| `./syncer.sh push` | rsync sources to `~/docs_asgn2` on the server (never sends `pass.txt` or results) |
+| `./syncer.sh pull` | copy every `part*/results/` back to the laptop |
+| `./syncer.sh run '<cmd>'` | push, then run a command in the server project dir |
+| `./syncer.sh part A test` | push, then `make -C partA test` on the server |
+| `tools/pdf.sh partA/REPORT.md` | build the PDF with pandoc and xelatex on the server, copy it back |
+| `./submitter.sh` | rebuild all report PDFs, then zip `Asgn2_22CS30056_22CS30032.zip` |
+
+**Server changes we made (all reversible).**
+
+- Cloned Brendan Gregg's FlameGraph into `~/docs_asgn2/FlameGraph` (needed for the flame graphs).
+- `kernel.kptr_restrict=0` while profiling, then back to `1`. Without it, perf cannot name kernel
+  functions and the biggest part of the lock cost shows up as a useless `[unknown]` block.
+  Command: `sudo sysctl -w kernel.kptr_restrict=0` (and `=1` afterwards).
+- Deep idle states off for the whole campaign: `echo 1 | sudo tee /sys/devices/system/cpu/cpu*/cpuidle/state[23]/disable`. Undo: write `0` to the same files. (Reason: waking a thread on a core in C2/C3 costs 127 us to 1 ms, which would distort every lock benchmark; as it turned out this was not the cause of our big discrepancy, see 1.11, but it is still the right setting for latency work.)
+- CPU governor and energy preference set to `performance` (it was `powersave` /
+  `balance_performance`) to remove frequency ramping as a source of noise.
+  Command: `echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor`
+  and the same for `.../energy_performance_preference`. Undo by writing `powersave` and
+  `balance_performance` back.
+- Nothing was installed with apt. `perf`, `g++ 12.3`, `pandoc`, `xelatex`, `google-chrome` and
+  `matplotlib` were already there.
+
+---
+
+## 1. Part A
+
+### 1.1 What the spec wants (short)
+
+A hash-table KV store with `put/get/erase`, a sanity test, three drivers that differ only in
+synchronisation (none, one `std::mutex`, a `std::shared_mutex`), `perf` profiling of the two lock
+versions at 1/2/4/8 readers with one background writer, flame graphs, an explanation of where
+time is lost (lock waiting versus cache-line bouncing, with evidence), and a design note on
+NSM versus DSM versus PAX backed by a microbenchmark.
+
+### 1.2 Hash table: three designs compared first
+
+Decision: which table layout to use. We did not just pick one. `partA/bench/table_bench.cpp`
+implements three tables and times them single-threaded:
+
+1. chained (one malloc'd node per key),
+2. open addressing, 24-byte slots pointing at a heap value,
+3. open addressing, one 64-byte cache-line slot with the value inline (48 bytes of room).
+
+Command (on the server): `g++ -O2 -std=c++17 partA/bench/table_bench.cpp -o /tmp/table_bench &&
+taskset -c 2 /tmp/table_bench`, run three times.
+
+Result at 100k keys: get 11.0 ns / 9.4 ns / 8.9 ns. At 1M keys: 44.1 / 50.2 / 35.7 ns. Insert is
+the other way round (inline is slowest, about 100 to 136 ns). We chose the inline slot because
+the workload is almost all gets, and a hit then touches exactly one cache line.
+
+Other choices in `kvstore.cpp` and why:
+
+- Linear probing with backward-shift deletion, so no tombstones pile up.
+- Load factor 0.5, table doubles. Keeps probe chains short.
+- Hash is the splitmix64 finaliser. Keys from the generator are `i * 100000 + j`, which are very
+  regular, and a weak hash would cluster them.
+- Values over 48 bytes go to the heap, so the store still accepts any size even though the
+  benchmark only uses 32 bytes.
+
+### 1.3 Synchronisation chosen at compile time
+
+The assignment says the three drivers must use the same data structure and differ only in
+locking. `kvstore.h` therefore has `#if NOVA_SYNC == 0/1/2` which picks the lock member and the
+guard type (`lock_guard<mutex>`, or `shared_lock` / `unique_lock<shared_mutex>`). The Makefile
+builds each driver with its own `-DNOVA_SYNC=n`. The table code is literally the same file.
+
+### 1.4 Things in the provided `workload_gen.cpp` that matter
+
+- It calls `create_index`, `index_get` and `Transaction` even when no join is used, so even the
+  Part A store has to declare them. We added stubs (`create_index` returns false, `Transaction`
+  just batches puts and applies them on commit). They do nothing real until Part C.
+- `workload_run` loads all trades with the writer **before** starting the readers. The spec asks
+  for a background writer throughout the read phase, so `common/driver_main.h` starts its own
+  writer thread. It waits until the last trade id is readable (that is how it knows loading is
+  done), then overwrites random existing trades at 50,000 puts/s until the readers stop. Only
+  one thread writes at any moment, which keeps the "single writer" assumption for Part B true.
+- It times every `get` with `steady_clock::now()`. That costs about 20 to 25 ns per call and shows
+  up in the flame graphs as `[vdso]` / `clock_gettime` (10% to 66% of samples). It is the same for
+  every store, but it means lock time is a smaller slice than it really is for the store itself.
+  We say this in the report.
+
+### 1.5 Verification of the store
+
+- `make test` on the server: `kvstore_test` passes.
+- `make check` runs the test under AddressSanitizer plus UBSan for all three sync modes, and
+  runs the rwlock driver under ThreadSanitizer. All clean: no memory errors, no data races.
+
+### 1.6 Throughput sweep (no profiler)
+
+`partA/scaling.sh` runs `single_thread` and both lock drivers at 1/2/4/8 readers, 3 repetitions,
+pinned to CPUs 0 to 15. Output in `partA/results/scaling.txt`. Medians of the final run (aligned
+build, see 1.11):
+
+| readers | global_lock | rwlock |
+|---|---|---|
+| 1 | 17.1M | 17.0M |
+| 2 | 21.6M | 25.0M |
+| 4 | 24.3M | 27.8M |
+| 8 | 12.3M | 21.2M |
+
+`single_thread` with one reader: 19.1M. (Side fact for Part D: `single_thread --readers 8`, which is
+only legal with no writer, reaches 90M+ reads/s, so unsynchronised read-only scales almost linearly.
+That is the ceiling the RCU store is trying to approach.)
+
+### 1.7 Profiling: how and why this way
+
+`partA/profile.sh` does, for each of `global_lock` and `rwlock` at 1/2/4/8 readers:
+
+1. start the driver in the background with a long enough duration,
+2. `sleep 2` so the load phase is over and all readers run,
+3. `perf stat -e task-clock,cycles,instructions,cache-references,cache-misses,L1-dcache-load-misses,LLC-load-misses,context-switches -p <pid> -- sleep 3`,
+4. `perf record -F 997 --call-graph dwarf,16384 -p <pid> -- sleep 3`,
+5. `perf script | stackcollapse-perf.pl > x.folded`, then `flamegraph.pl x.folded > x.svg`.
+
+Two bugs we hit and fixed, worth remembering:
+
+- Running `perf stat` on the whole program also counted the end-of-run merge and sort of about
+  100M latency samples, which polluted the cache counters. Fix: attach to the running pid for a
+  fixed window.
+- The first version ran `perf stat` and `perf record` one after the other for 3 s each but the run
+  lasted only 7 s, so the record window slipped into the final sort (`std::__unguarded_partition`
+  showed up in the flame graph). Fix: run duration is `2 * window + 5`.
+
+Frame pointers (`-fno-omit-frame-pointer`) were not enough because libc is built without them, so
+`--call-graph dwarf` is used instead.
+
+SVG to PNG for the report: headless Chrome,
+`google-chrome --headless=new --no-sandbox --screenshot=x.png file://.../x.svg`.
+
+`tools/summarize_partA.py` turns the stat files and folded stacks into the two tables in the
+report (counters per thread count, and share of samples by category of the leaf function).
+
+### 1.8 What the profile showed (the actual answer to the question)
+
+The spec asks: lock acquisition or cache-line bouncing? The answer is that it is different for
+the two locks.
+
+- `global_lock`: 32% of samples in the kernel futex path already at 4 readers, 54% at 8
+  (`native_queued_spin_lock_slowpath`, `futex_wait`, `futex_wake`, `lll_lock_wait`), 494k context
+  switches per second at 8. Threads sleep and wake. That is waiting for the lock.
+- `rwlock`, 8 readers: only 5.6% in the kernel, but 65% inside `pthread_rwlock_rdlock` and
+  `rdunlock`. Those are atomic add/sub on one shared reader counter. IPC falls from 1.69 to 0.45
+  and L1 misses per 1k instructions rise from 1.9 to 6.4, while last-level misses stay at about
+  0.01 per 1k instructions. The cache line holding the counter moves between cores' private
+  caches and never goes to memory. That is cache-line bouncing.
+- The plain `cache-miss %` is misleading (it falls from 25% to 3% as threads grow) because its
+  denominator, cache references, grows with thread count. Misses per instruction is the
+  honest metric.
+
+### 1.9 Layout microbenchmark (NSM vs DSM vs PAX)
+
+`partA/bench/layout_bench.cpp` builds the same 32-byte `Trade` table three ways (NSM array of
+structs, DSM one array per field, PAX with 16/64/256 rows per page) and measures:
+
+- whole-row get (random row, next index depends on the data read, so it measures latency),
+- symbol-only get (the join probe),
+- full scan of the price column,
+- 8-thread whole-row get throughput.
+
+At 100k rows (the real workload, 3.2 MB) and at 4M rows (128 MB, out of cache). Three runs.
+
+One mistake caught on the way: the first 8-thread loop only used `id` and `ts`, so the compiler
+dropped the loads of the other fields and DSM looked faster. Fixed so every layout reads the whole
+row, as the readers do.
+
+Result: NSM wins whole-row gets (15.7 ns vs DSM 18.6, PAX-64 17.5 at 100k; 116 vs 150 and 140 at
+4M) and 8-thread throughput by 20% to 30%. DSM wins single-field reads and scans, which the
+workload does not do. PAX never wins a pattern outright. Decision: NSM, and the report says
+what would change our mind (a column-scan workload).
+
+### 1.10 Report
+
+`partA/REPORT.md` (4 pages with the layout note). Key sentences are in bold. The rendered
+PDF is `partA/REPORT.pdf`. Rebuilt with `tools/pdf.sh partA/REPORT.md`.
+
+### 1.11 The layout trap (the biggest thing that went wrong, and how it was found)
+
+**Symptom.** Part A's lock numbers (global lock 9.2M reads/s at 8 readers) did not match a later
+full run of the same binaries inside the Part D scripts (global lock 21M at 4 readers, 13M at 8).
+Not a small difference: 2x to 3x, and each session was internally consistent.
+
+**What we suspected, in order, and what each test showed.**
+
+1. External load on the shared server. Checked `ps`, `uptime`, a 300 ms busy-loop per CPU
+   (`tools/cpucheck.c`): all cores were free. Not it.
+2. Deep C-states making futex wake-ups slow. Tested cold, warmed, and with C2/C3 disabled. Changed
+   the numbers a little, did not explain 3x.
+3. How the run was launched (`nohup`, `setsid`, piped to `awk`, wrapped in `/usr/bin/time`, other
+   working directory). Only the other working directory moved the result, which is absurd for a
+   program that touches no files. That was the clue.
+4. **Environment size.** Padding one unrelated environment variable by 0 to 120 bytes moved the
+   same binary between 8.4M, 11M and 26M, repeating with period 64 bytes (the cache-line size).
+
+**Cause.** The driver's `KVStore` is a local variable on the main thread's stack, so its address
+shifts with the size of the environment. Inside the object the lock and the table header
+(`slots_`, `cap_`, `size_`, read on every get) sat next to each other, so depending on the shift they
+were in the same cache line or not. The "same line" case makes every lock operation invalidate the
+line every reader needs, which is the worst case.
+
+**Fix.** `class alignas(64) KVStore`, the table header on one line, the lock alone on the next
+(`alignas(64)`). In the RCU stores `current_` is alone on its line and the writer's mutex, retire
+list and counters sit on others, because otherwise every put also invalidated the line readers load
+the version pointer from. The evidence is kept: `tools/layout_sensitivity.sh` builds the old layout
+(`-DNOVA_NO_ALIGN`) and the new one and sweeps the padding. Old layout global lock: 8.5M to 25.9M
+(3.05x spread). Aligned: 19.8M to 24.7M (1.25x). `tools/envsweep.sh` does the same for all stores.
+
+**Consequence.** Everything measured before the fix was thrown away and redone: Part A scaling
+and flame graphs, the Part B design sweep and scheme comparison (the benchmark harness had the same
+flaw), all of Part D. The Part A report's conclusions changed shape: the locks now scale to 4
+readers (1.4x and 1.6x) instead of never scaling, then collapse at 8. The diagnosis (waiting vs
+bouncing) survived.
+
+**A second layout problem, in the provided code.** The generator's `per_thread` latency vectors sit
+side by side, so concurrent `push_back` calls from different threads write one cache line.
+`partD/experiments/padded_generator.sh` pads them in a copy: RCU at 8 readers goes from 75.9M to
+109.8M reads/s. We kept the original for D.1 (the spec says use it) and added a histogram harness,
+which does not have this problem, for the rest.
+
+**Lesson, for next time.** If a concurrent benchmark depends on anything you did not mean to vary
+(working directory, environment, launch method), suspect memory layout first, and prove the fix
+with a sweep over the thing that should not matter.
+
+---
+
+## 2. Part B
+
+### 2.1 What the spec wants (short)
+
+Replace the locks inside the same `KVStore` class with RCU: the writer builds a new version off to
+the side and publishes it with one atomic pointer swap; a reader does exactly one atomic load of
+that pointer and works on that snapshot. Old versions are freed by epoch-based or hazard-pointer
+reclamation, bounded by a tunable `set_reclaim_batch(int n)`. Deliverable: store + diff vs Part A,
+a README on the reclamation design and the parameter, and a stress test showing no torn rows.
+
+### 2.2 The main question: what do we copy on each write?
+
+Copying the whole table per put is the textbook RCU and it does not work for 100k keys. We measured
+four ways with `partB/bench/design_bench.cpp` (one writer, 8 readers, same epoch scheme in all):
+
+1. **full copy** of the slot array: 211 us per put at 5k keys, 1.04 ms at 20k keys, so about 5 ms at
+   100k. Impossible at 50k puts/s. Rejected on data.
+2. **segment directory** (root of NSEG pointers, a put copies the root and one segment), with the
+   value either inline in a 64-byte slot or behind a pointer.
+3. **radix trie** with path copying (fan-out 16/32/64/256, leaf of 8/16/32 entries).
+
+Commands: `partB/bench/sweep.sh` on the server (takes about 25 minutes), `./syncer.sh pull`, then
+`python3 tools/summarize_design.py`. Data in `partB/results/design_sweep.txt`.
+
+What decided it: the segment directory is a little faster to read (12% to 18%) but its put cost grows
+with the table (3.3 us at 100k keys, 7.8 us at 1M, and the best NSEG changes with size). The trie put
+cost stays near 1 us at both sizes, uses about half the memory and loads 1M keys in 0.2 s instead of
+2.7 s. It is also what Part C wants for multi-key commits, because several writes in one commit can
+share one copied path. We chose the **64-way trie with 8 entries per leaf**. 32-way and 256-way were
+slower or bigger; leaf 16 and 32 were within noise of 8.
+
+Mistake worth knowing about: our first trie benchmark loaded 100k keys in 0.01 s, which looked too
+good, and we had never checked the benchmark actually returned correct data. We added a check that
+reads back every key after loading. All designs passed, so the speed was real.
+
+### 2.3 Reclamation: epoch vs hazard pointers, measured not guessed
+
+Epoch scheme: one cache-line slot per reader thread in a process-wide table; reader stores the
+global epoch with a full barrier (`exchange`), then loads `current_` once. Writer stamps retired
+objects with the epoch at the swap and frees a record only when its stamp is below the oldest
+announced epoch. Records are in publish order so freeing is oldest first.
+
+To justify the choice we built the same store with hazard pointers (`partB/bench/kvstore_hp.cpp`)
+and ran `partB/compare_schemes.sh` (3 interleaved runs per reader count). Reads were close
+(epoch 74.0M vs hazard 69.8M at 8 readers, equal at 1 to 2 readers). Reasons for epochs are therefore not speed: hazard
+pointers need a second load to validate the pointer (spec says exactly one load), and their usual
+advantage disappears because versions share most nodes, so any pinned reader blocks everything newer
+anyway. Part C snapshots also fit epochs naturally (a slot that stays announced).
+
+Bounded pass: `reclaim_pass()` runs at the end of each publish on the writer thread, frees at most
+`batch_` records, never waits (a pinned record just stays). `set_reclaim_batch(0)` disables it,
+which is what Part D.2's "no reclamation" reference uses. `reclaim_stats()` exposes counters.
+
+### 2.4 Verification, and what it caught
+
+- `make test`: unit test and the stress test (6 readers, writer doing put and erase on 5,000 keys
+  for 5 s; every row has a version and three derived words that the reader recomputes; also checks
+  per-key version never goes backwards). Result (recorded in partB/results/tests.txt): 5.5M writes, 682M reads, 0 torn, 0 regressions.
+- `make check`: ASan+UBSan and TSan. **ASan caught a real bug**: `Version` was allocated with `new`
+  but freed with `free` from the retire list. Harmless on glibc, still wrong. Fixed by allocating
+  versions with `malloc`.
+- Negative control: `-DNOVA_BROKEN_RECLAIM` makes `min_active_epoch()` ignore readers. The stress test
+  under ASan then reports `heap-use-after-free` in `find` within seconds. So a pass means something.
+- TSan does not model `atomic_thread_fence`, so its clean result is weaker than the ASan control.
+- The hazard-pointer variant also passes the ASan stress test.
+
+### 2.5 Numbers (final, aligned build; full tables are in Part D)
+
+Part A driver, background writer at 50k puts/s, M reads/s: 1 reader 14.8, 2 readers 23.6, 4 readers
+42.2, 8 readers 75.2. Locks at 8 readers: 12.2 (global) and 20.8 (rwlock). Tail latency p999 is 0.26
+us for RCU against 4.8 to 6.5 us for the locks. One honest point: at 1 reader RCU (14.8M) is slower
+than the plain mutex (17.1M), because every read does the epoch announce (a locked instruction) and
+walks the trie. It wins by scaling, not by single-thread speed.
+
+### 2.6 Deliverable files
+
+`partB/{kvstore.h,kvstore.cpp,kvstore_test.cpp,stress_test.cpp,rcu.cpp,Makefile,README.md,PART_B_DIFF.patch}`
+plus the supporting `bench/` and `results/`. Diff made with
+`diff -u --label partA/kvstore.h --label partB/kvstore.h partA/kvstore.h partB/kvstore.h` (same for .cpp).
+
+---
+
+## 3. Part C
+
+### 3.1 What the spec wants (short)
+
+C.1: a real `Transaction` (stage in `put`, publish all in `commit` with one pointer swap, drop on
+destruction), plus a design note on the isolation level, write skew and durability. C.2: a secondary
+index on a non-key field, a move-only `Snapshot` handle, `keys()`, and an index-nested-loop join that
+uses one snapshot for every call.
+
+### 3.2 Decisions and why
+
+- **Transaction = one build, one publish.** `commit()` runs every staged write through the same
+  path-copying code as a single `put`, in one build, then does one `current_` store. Nodes created by
+  the running build are unpublished, so later writes in the same commit modify them in place; that is
+  why a 16-key commit does not copy 16 whole paths. (Build ids are 64-bit so an old node can never be
+  mistaken for one of the current build.)
+- **Index = a second trie in the same Version.** That is what makes table and index atomic together.
+  We did not use posting lists (copying a 2,000-entry list per insert would be awful). One entry per
+  row, keyed by primary key, routed by the top 30 bits of a hash of the field, low bits from the key.
+  So all rows with one field value live under the same depth-5 node and a lookup is a descent plus a
+  subtree walk. Stored field bytes are compared, so a 30-bit hash collision is harmless.
+- **Snapshot owns its own epoch slot** (not the thread's cached one), so plain `get()` calls made
+  while holding it don't disturb the pin. Move-only; destructor releases the slot.
+- **One handle across two stores.** The workload has two separate `KVStore` objects but the spec
+  insists on exactly one handle. The handle binds lazily: first use on another store pins whatever
+  that store's current version is then. Safe because the epoch table is process-wide: anything current
+  after our announcement is retired at an epoch >= ours. Cost: the two stores are each fixed, but not
+  at the same instant. Said so in the README.
+- **First-committer-wins added late, on purpose.** First draft was blind writes. Writing the isolation
+  note we realised "snapshot isolation" needs a write-write check or it allows lost updates, so each
+  row got a 32-bit commit stamp (in the spare `pad` bytes of the 48-byte `Val`), a transaction records
+  a start sequence (its own creation time, or a Snapshot passed to the constructor), and commit
+  refuses if any key it writes has a newer stamp. Reads are not validated, which is exactly what
+  leaves write skew possible. Both behaviours have a test.
+
+### 3.3 Tests, with what each proves
+
+`make test` and `make check` in `partC/` (the second adds ASan, UBSan and TSan builds of every test).
+
+| test | evidence |
+|---|---|
+| atomicity | 3.0M 8-key commits, readers read all 8 through a snapshot, 0 torn |
+| atomicity control | same readers vs 8 separate `put()`s: 28M torn snapshots, so the check can fail |
+| lost update | two transactions, same key: second `commit()` false, nothing visible |
+| write skew | doctors on call: both commit, 0 on call (this is SI, not serializable) |
+| isolation | one held snapshot, 103M reads, 1.3M concurrent commits and erases, 0 changes |
+| reclaim drain | after releasing, 23,374 writes drained a 1.4M-version backlog; no pass freed more than 64 |
+| index | index vs full scan inside one snapshot while writers run: 0 mismatches in 66.6k checks |
+| join | 40.7k joins against a writer rewriting instruments in one transaction: all consistent; re-running on a held snapshot gives the identical result hash |
+
+Gotchas met on the way:
+
+- The first isolation test failed because we expected a 1.4M-version backlog to drain after 2,000
+  writes. With batch 64 it cannot (2,000 x 64 = 128k). That is the bound working, not a bug; the test
+  now writes backlog/64 + 1000 times and also asserts no pass exceeded the batch.
+- A held snapshot is a memory cost, not a blocking one: 1.4M retired versions in 3 s of unthrottled
+  commits. Worth a sentence in Part D's COW discussion.
+- The test macro `CHECK(c, ...)` with an empty `__VA_ARGS__` produced hundreds of format warnings;
+  split into `CHECK` and `CHECKF`.
+
+### 3.4 Deliverable files
+
+`partC/{kvstore.h,kvstore.cpp,join.h,schema.h,kvstore_test.cpp,txn_test.cpp,stress_test.cpp,rcu.cpp,Makefile,README.md,PART_C_DIFF.patch}`.
+Diff made with `diff -u --label partB/kvstore.h --label partC/kvstore.h partB/kvstore.h partC/kvstore.h` (and .cpp).
+
+---
+
+## 4. Part D
+
+### 4.1 What the spec wants (short)
+
+D.1: point-get throughput and p50/p99/p999 for single-thread, global lock, rwlock and RCU at 1/2/4/8
+readers with a background writer, where each lock version stops scaling, whether RCU holds 100k+ reads/s
+at 8 readers (flame graph if not). D.2: reclaim batch at four or more values, read RPS and the longest
+reader stall, plus a no-reclaim reference and a naive stop-the-world reference. D.3: join throughput
+with writer on vs paused, commit throughput for 1/4/16 keys per transaction, bounded vs stop-the-world
+pause, and an explanation of when copy-on-write hurts.
+
+### 4.2 Decisions
+
+- **Two instruments.** D.1 must use the provided generator, so `common/driver_main.h` (background
+  writer, `--csv`) wraps it. But the generator only reports p50/p99/p999, not the maximum that D.2
+  asks for, so `partD/bench.cpp` reads the store the same way (same trades, 80% hot / 20% random, every
+  call timed) with a log-linear histogram per thread. Percentiles within 1.6%, maximum exact. It also
+  avoids the generator's shared-vector-header problem (1.11), so we report D.1 both ways.
+- **`single_thread` and the writer.** An unsynchronised store cannot run with a concurrent writer, so
+  D.1 shows it with one reader (the real single-thread case) and, as a labelled ceiling, with more
+  read-only readers and no writer.
+- **D.2 needs backlog.** Short reads never fall behind, so with the D.1 workload reclamation has almost
+  nothing to do and every batch looks the same. A second "bursty" scenario adds a thread that pins a
+  snapshot for 50 ms of every 100 ms and a 300k puts/s writer, so a 15k-version backlog builds and must
+  be drained. Both scenarios are reported.
+- **Naive stop-the-world is built in the harness, not the store.** The store only gained an unbounded
+  `reclaim_all()`. The harness parks its reader threads at operation boundaries (a flag and a counter),
+  calls `reclaim_all()`, releases them. The park time counts in the readers' latency, so it shows as
+  the stall. First version re-froze on every write when a pinned snapshot kept the backlog above the
+  trigger (326,749 freezes in 3 s), which made the reference unfairly bad; fixed so it waits for
+  another T retired versions after each freeze.
+- **Idle check before each group**, reading `/proc/stat` twice (it spins nothing). The first version
+  used a spin loop on every core, which both warmed the cores and, by a bug in the awk field index,
+  reported nonsense; replaced.
+
+### 4.3 Commands
+
+On the server, everything is `tools/run_everything.sh` (tests, Part A, Part B design sweep and scheme
+comparison, then `partD/run_all.sh` = `d1.sh`, `d2.sh`, `d3.sh`, `profile_rcu.sh`, then
+`tools/envsweep.sh`). Extra experiments: `partD/d1b.sh` (D.1 in the harness),
+`partD/experiments/padded_generator.sh`, `partD/experiments/join_placement.sh`,
+`tools/layout_sensitivity.sh`, `tools/record_tests.sh`. Summaries: `python3 tools/summarize_d.py d1|d1b|d2|d3`,
+charts `python3 tools/make_charts.py`. Reports: `tools/pdf.sh partD/REPORT.md`.
+
+### 4.4 Results in one paragraph each
+
+- **D.1.** Locks stop scaling at 2 readers (21.5M and 24.8M in the generator) and get worse at 8
+  (12.2M and 20.8M); RCU keeps scaling (14.8M at 1, 75.2M at 8 in the generator, 112M in the harness,
+  7.6x). 100k target met about 750 times over. RCU loses to a mutex at 1 reader (14.8M vs 17.1M). The
+  RCU flame graph shows about 69% of the time is the generator's own measurement.
+- **D.2.** Batch size changes neither throughput (99.3M to 100.1M) nor the longest reader stall (about
+  0.1 to 0.2 ms, which is the machine's noise floor). It changes the length of one reclaim pass,
+  linearly (about 0.75 us per version: 12 us at batch 1, 3.1 ms at 4096). Not reclaiming costs 2% of
+  speed but 3.2 GB. Stop-the-world stalls the readers 11.9 to 20.9 ms and costs 20% to 24% throughput.
+  This is not the "bigger batch, longer stall" the spec expected, and the report says why.
+- **D.3.** The writer costs a running join nothing measurable (and the 1000-row join was 10% faster with
+  it, repeatably, not explained, not thread placement). Under 8 readers RCU commits 6x to 13x more
+  per second than the lock store and its readers run 6x faster. One 100,000-key transaction is 4x slower
+  than in place and needs 48 MB extra, which is the answer to "when does COW hurt".
+
+### 4.5 Mistakes worth remembering
+
+- Launching a background job before pushing the new scripts to the server (twice): the job failed
+  instantly and the "finished" monitor fired. Always `./syncer.sh push` before a `run`.
+- `pkill -f run_all.sh` inside the same ssh command matched the shell running it and killed it. Kill
+  by pid.
+- Trusting a number because it was consistent. The D.1 lock numbers were perfectly repeatable and
+  wrong (for the question we were asking), because they sat in one memory-layout regime.
+- The first version of every claim in the reports was checked against the data files line by line
+  before the PDF was built; about ten wording errors were found that way (a profile row that counted
+  one thing twice, ratios taken against the wrong baseline, a hypothesis stated as fact).
+
+### 4.6 Server state (restored at the end of the project)
+
+The measurements are finished and `tools/restore_server.sh` has been run: governor back to `powersave`, energy preference
+to `balance_performance`, deep idle states on, `kptr_restrict=1`.
+
+---
+
+## 5. Part E (the bonus: a write-ahead log)
+
+### 5.1 What the spec wants (short)
+
+Append every committed transaction to an on-disk log before or as part of its RCU publish; a restarted
+process replays the log. No per-read overhead. Justify where the fsync goes and how writes are batched
+(group commit). Deliverable: the WAL and its diff, a short note on the fsync/group-commit policy and its
+throughput cost (re-run D.1's write-side numbers with and without it), half a page on what is still
+missing for a real desk.
+
+### 5.2 Design decisions and why
+
+- **Separate `wal.h/wal.cpp`, called from the commit paths.** The store changes only where it commits:
+  build the version, `append` the record, publish, release the lock, `wait_durable`. `get`, `index_get`
+  and the snapshot `get` are byte-identical to Part C (we `diff` the function bodies; it is in the README).
+- **Log before publish, wait after unlock.** Log order then equals publish order, and the wait happens
+  outside the writer lock so other commits can join the same sync. We did *not* hold publication until
+  the sync finished: that would serialise commits behind a 0.2 to 1.5 ms fdatasync or delay readers by
+  that long. The price (stated in the README): a reader can see a commit that a power cut then loses.
+- **Three levels instead of one policy**, because the right answer depends on what "survives" means:
+  Async (buffered, background flush), Write (`write()` per commit, survives `kill -9`), Sync (fdatasync,
+  survives power loss, group commit by leader/follower). Recommended for the feed: Write with a 1 ms
+  background fdatasync.
+- **`fdatasync` on a preallocated file** (so appends do not change the size metadata). Probe on this
+  disk: 231 us fdatasync vs 280 us fsync.
+- **Record = header + CRC32C + log sequence number.** Replay stops at the first record whose magic,
+  length, checksum, sequence number or contents is wrong. Zeros mean end of log (preallocation). New
+  files get their directory entry fsynced. A failed write or fsync puts the log in a failed state and
+  we never retry.
+- **Torn tail vs damage in the middle.** First version silently dropped everything after any bad
+  record. Thinking about "what would a real desk do" showed that is wrong for bit rot in the middle:
+  it throws away acknowledged commits without saying so. Replay now also scans past the damage and
+  reports how many valid records it dropped (`records_after_damage`): zero means a torn tail (normal
+  after a crash), above zero means corruption. Tests check both cases. We still only detect, not repair.
+
+### 5.3 Tests (all in `partE/`, `make test` and `make check`)
+
+- `wal_test`: round trips at every level against an oracle; the file cut at every byte of its last 3
+  records plus 150 random places (877 cuts); 600 random bit flips; a record removed and a record repeated
+  (caught by sequence numbers); recovery from a torn tail then more appends; 8-thread group commit.
+- `crash_test`: fork a child that commits flat out, `SIGKILL` it at a random moment, recover in the parent,
+  repeat 40 times per level on the same log. Write and Sync lose no acknowledged commit; Async loses up
+  to a few thousand (the flush window); transactions always come back whole.
+- ASan/UBSan on all of it, TSan on `wal_test`. Not testable here: a real power cut (the README says so).
+
+### 5.4 Things that went wrong on the way
+
+- **The first Part E benchmark failed instantly** because the output directory did not exist on the
+  server; the "finished" watcher fired immediately. (Third time this has happened. `mkdir -p` before
+  redirecting.)
+- **Real bug found by the smoke test:** the background fdatasync held the file mutex, so every commit's
+  `write()` waited behind it; Write-level p99 was 417 us and the worst case 7.8 ms. fdatasync does not need
+  that lock. Fixed; p99 became 3.9 us and the worst case 131 us.
+- **A packaging bug found by the new part:** Part C's `make check` rules had no include path for
+  `schema.h` (moved to `common/` earlier). It had only worked on the server because a stale copy of the
+  file was still there (our sync never deletes). Fixed in both Makefiles, stale file removed, and a
+  clean-unzip check added (`tools/verify_all.sh`).
+- **The disk is not a constant.** Identical Sync runs gave about 220 us per sync in one stretch and about
+  1.5 ms in another (medians of three mixed the two). The sweep now flushes and pauses before each run,
+  records a quick fdatasync probe, and prints each run's own average sync latency; group commit is judged
+  by commits per sync, which does not depend on the disk.
+- An assertion that group commit must share syncs even with no delay could flake on a fast disk; it is
+  now required only when a delay is set.
+
+### 5.5 Final checks done for the whole assignment
+
+Went through the spec sentence by sentence (every must/state/report/explain) against the deliverables.
+Found and closed: the single-thread-with-a-writer configuration for D.1 (one thread doing both),
+the raw histograms for D.1 and the D.3 joins, the sanitizer include-path bug above, and `tools/` plus an
+`INDEX.md` missing from the zip. `tools/verify_all.sh` builds every part from a clean unzip, runs every
+test and sanitizer check and smoke-runs every benchmark; its log is `verification.txt` in the zip.
+
+---
+
+## 6. The last round of fixes
+
+After the first full pass we listed everything that was still weak and fixed what could be fixed.
+(Per your instruction we did not add PDFs for the B, C and E notes: the READMEs are what the assignment
+asks for. We also did not add anything the assignment does not ask for.)
+
+1. **D.1 single-thread configuration.** An unsynchronised store cannot run with a second thread writing,
+   so "single thread at 1, 2, 4, 8 readers with a writer" is modelled as one thread serving N clients in
+   turn (`--clients N` in `bench.cpp`). Result: 19.4 to 19.6M reads/s for 2, 4 and 8 clients, the same as for
+   one, so it does not scale at all. Raw data: `partD/results/d1_single_clients.txt`.
+2. **The unexplained join speed-up is now explained, by experiment.** Guess: copy-on-write re-lays-out the
+   nodes the writer touches next to each other. Test (`partD/experiments/join_locality.sh`): joins on a
+   table rewritten by 2,000,000 puts, writer paused, were 28% faster than on a freshly loaded table
+   (226k vs 176k joins/s), and with the layout equalised the writer's real cost shows as about 5%.
+3. **Corruption in the middle of the log is refused by default.** Before, replay dropped everything after
+   any bad record, including acknowledged commits, without saying so. Now, if valid records follow the
+   damage, `open_wal` refuses and leaves the file alone; `WalOptions::repair` is the explicit way to discard
+   them. A torn tail (nothing valid after it) is still dropped automatically. Replay validates in a first
+   pass and applies in a second, so a refusal happens before anything has been applied.
+4. **Simulated power loss.** The log tracks the file offset up to which an `fdatasync` has completed.
+   `crash_test` now kills the child, then damages only what lies beyond that offset (dropped, cut
+   mid-record, random garbage, a zeroed 4 KB page with later pages surviving) and recovers. Sync lost no
+   acknowledged commit in any of the 160 runs (all had unsynced data to damage).
+5. **API wording.** Each header now says which methods are the Appendix A interface and marks the rest
+   "extra, not in Appendix A".
+6. **Second machine.** `tools/second_machine.sh` repeats D.1 anywhere in about six minutes. We ran it on
+   the laptop (i5-6300U, 4 threads): same ranking, results in the D report and
+   `partD/results/second_machine_laptop.txt`. Run it on any other machine you like and keep the output.
+7. **Organisation.** `INDEX.md` in the zip is now a map from each deliverable the assignment asks for to
+   its file, plus how to build, test and reproduce.
+
+Bugs found by the new tests while doing this (worth remembering how):
+
+- **A failed `open_wal` truncated the log file to zero bytes.** The half-opened `Wal` object was destroyed
+  on the failure path and its destructor ran the normal shutdown (trim the file to `file_end_`, which was
+  still 0). It would have wiped any file passed by mistake. Found because the new "a refused open must leave
+  the file untouched" check failed 3,000 times. Fix: shutdown work only runs if `open()` finished
+  (`ready_` flag).
+- **A bug in our own power-loss test.** The "synced offset" shared with the child started at 16 (the file
+  header) instead of the length of the log just recovered, so when the child was killed before its first
+  commit the "drop" scenario wiped the whole log. It showed up as an absurd "worst loss 236,903 commits" at
+  the Write level, which is why every number that looks wrong gets checked before it goes in a document.
+- A test of the new script `tools/second_machine.sh` on the laptop printed zeros: `ops_per_s=` also
+  matches inside `writer_ops_per_s=`, and a trailing blank line made the median pick an empty value.

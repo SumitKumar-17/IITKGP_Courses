@@ -1,0 +1,22 @@
+PASS  partA: clean build
+PASS  partA: tests
+PASS  partA: sanitizers
+PASS  partB: clean build
+PASS  partB: tests
+PASS  partB: sanitizers
+PASS  partC: clean build
+PASS  partC: tests
+PASS  partC: sanitizers
+PASS  partE: clean build
+PASS  partE: tests
+PASS  partE: sanitizers
+PASS  partD: build
+PASS  partD: point mode, RCU
+PASS  partD: point mode, rwlock
+PASS  partD: join mode
+PASS  partD: stop-the-world mode
+PASS  partD: big transaction mode
+PASS  partD: write-ahead log, sync
+PASS  partD: replay speed
+PASS  provided drivers (generator)
+ALL PASSED

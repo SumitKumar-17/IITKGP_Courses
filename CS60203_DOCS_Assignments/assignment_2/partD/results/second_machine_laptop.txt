@@ -1,0 +1,23 @@
+machine:  Intel(R) Core(TM) i5-6300U CPU @ 2.40GHz
+threads:  4   kernel: 7.2.6-arch2-1   date: 2026-10-06
+governor: powersave
+runs:     3 x 5s per point, median shown
+
+store         readers    reads/s (M)   p99 (ns)  p999 (ns)
+single              1            7.7        268        560
+single              2           16.9        214        408
+single              4           23.3        246        464
+single              8           20.3        250        504
+global              1            5.6        440       3744
+global              2            3.0       4800       9088
+global              4            3.1       6848      18688
+global              8            2.7       7104     119808
+rwlock              1            6.0        448       2560
+rwlock              2            7.4       2080       8960
+rwlock              4           10.5        452      10496
+rwlock              8           10.3        992       1808
+rcu                 1            5.5        380        640
+rcu                 2           10.6        372        640
+rcu                 4           14.3        372        648
+rcu                 8           15.5        388        688
+
