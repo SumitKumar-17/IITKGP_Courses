@@ -1,0 +1,95 @@
+\documentclass[12pt, a4paper]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{hyperref}
+\usepackage{setspace}
+\usepackage{fancyhdr}
+
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{remark}[theorem]{Remark}
+
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{Threshold Signatures}
+\lhead{Term Project Report}
+\cfoot{\thepage}
+
+\onehalfspacing
+
+\begin{document}
+
+% -----------------------------------------------------------
+% Title Page
+% -----------------------------------------------------------
+\begin{titlepage}
+    \centering
+    \vspace*{3cm}
+    {\LARGE \textbf{Threshold Signatures}}\\[0.8cm]
+    {\large Term Project Report}\\[2cm]
+    {\large \textbf{Team 5}}\\[0.5cm]
+    \begin{tabular}{ll}
+    22CS30043 & Raaja Das \\
+22CS30056 & Sumit Kumar \\
+22CS30067 & Alla Sarmada \\
+    \end{tabular}\\[2cm]
+    {\large CS60088 Foundations of Cryptography}\\[0.3cm]
+    {\large \today}
+    \vfill
+\end{titlepage}
+
+% -----------------------------------------------------------
+% Abstract
+% -----------------------------------------------------------
+\input{chapters/abstract}
+
+\tableofcontents
+\newpage
+
+% -----------------------------------------------------------
+% Introduction
+% -----------------------------------------------------------
+\input{chapters/introduction}
+
+% -----------------------------------------------------------
+% Chapter 1
+% -----------------------------------------------------------
+\newpage
+\input{chapters/chapter1}
+
+% -----------------------------------------------------------
+% Chapter 2
+% -----------------------------------------------------------
+\newpage
+\input{chapters/chapter2}
+
+% -----------------------------------------------------------
+% Chapter 3
+% -----------------------------------------------------------
+\newpage
+\input{chapters/chapter3}
+
+% -----------------------------------------------------------
+% References
+% -----------------------------------------------------------
+\newpage
+\begin{thebibliography}{9}
+
+\bibitem{Shoup00}
+V. Shoup, ``Practical threshold signatures,''
+\emph{Advances in Cryptology -- Eurocrypt 2000}, LNCS 1807, pp.\ 207--220, Springer, 2000.
+
+\bibitem{Bold03}
+A. Boldyreva, ``Threshold signatures, multisignatures and blind signatures based on the
+Gap-Diffie-Hellman-group signature scheme,''
+\emph{Public Key Cryptography -- PKC 2003}, LNCS 2567, pp.\ 31--46, Springer, 2003.
+
+\bibitem{FROST20}
+C. Komlo and I. Goldberg, ``FROST: Flexible Round-Optimized Schnorr Threshold Signatures,''
+\emph{Selected Areas in Cryptography -- SAC 2020}, LNCS 12804, pp.\ 34--65, Springer, 2021.
+
+\end{thebibliography}
+
+\end{document}

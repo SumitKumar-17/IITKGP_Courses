@@ -1,0 +1,119 @@
+\section{Introduction}
+\label{sec:intro}
+
+Most cryptographic protocols are designed around a single signer. A certificate authority
+has one private key; a server authenticating to a client uses one key. This simplicity is
+convenient, but it creates a serious problem in settings where the signer is a
+high-value target. If that one key is stolen, the attacker can impersonate the signer
+forever. If the machine holding the key goes down, signing stops entirely. For a root CA
+or a financial institution's signing infrastructure, neither outcome is acceptable.
+
+Threshold signature schemes address this by distributing the signing key across $n$
+parties in such a way that any $k$ of them can cooperate to produce a valid signature,
+but any coalition smaller than $k$ cannot sign anything, and in fact learns nothing about
+the private key. The security guarantee is analogous to Shamir's secret sharing
+\cite{Sha79}: the key is shared, not replicated. This is fundamentally different from
+simply storing the same key on multiple machines. Threshold security means that even
+if up to $k - 1$ machines are fully compromised, the key itself remains secret and the
+attacker cannot forge signatures.
+
+\subsection{Shamir Secret Sharing and Its Role in Threshold Signatures}
+\label{subsec:sss}
+
+Shamir's Secret Sharing (SSS) \cite{Sha79} is the foundational building block for most
+threshold signature schemes. It distributes a secret $s$ among $n$ participants so that
+any subset of size at least $t$ (the threshold) can reconstruct $s$, while any subset of
+size $t-1$ learns nothing about $s$. The scheme is information‑theoretically secure and
+works over a finite field $\mathbb{F}_q$ with $q > n$.
+
+\paragraph{Share generation.}
+A dealer chooses a random polynomial $f(x) \in \mathbb{F}_q[x]$ of degree at most $t-1$:
+\[
+f(x) = a_0 + a_1 x + \cdots + a_{t-1} x^{t-1},
+\]
+with constant term $a_0 = s$. Coefficients $a_1,\dots,a_{t-1}$ are uniform in $\mathbb{F}_q$.
+For each participant $i = 1,\dots,n$, the dealer assigns a distinct non‑zero evaluation
+point $x_i \in \mathbb{F}_q^\times$ (public) and computes the share $y_i = f(x_i)$.
+
+\paragraph{Reconstruction via Lagrange interpolation.}
+Given any $t$ distinct shares $(x_{i_j}, y_{i_j})$, the polynomial $f$ is uniquely determined.
+The secret is $s = f(0) = \sum_{j=1}^{t} y_{i_j} \cdot \ell_j(0)$, where
+\[
+\ell_j(x) = \prod_{\substack{k=1\\ k \neq j}}^{t} \frac{x - x_{i_k}}{x_{i_j} - x_{i_k}}.
+\]
+
+\paragraph{Proof of correctness.}
+\textit{Any $t$ distinct shares uniquely determine $s$.} A polynomial of degree $\le t-1$
+over a field is uniquely determined by its values at $t$ distinct points. Since $f$ has
+degree $\le t-1$ and passes through the given $t$ points, $f(0)=s$ is fixed.
+
+\paragraph{Proof of security (information‑theoretic).}
+\textit{Any set of at most $t-1$ shares reveals no information about $s$.}
+Fix $t-1$ shares $(x_i, y_i)$. For any candidate secret $s' \in \mathbb{F}_q$, there
+exists exactly one polynomial $f'$ of degree $\le t-1$ satisfying $f'(0)=s'$ and
+$f'(x_i)=y_i$ (interpolate through the $t$ points $(0,s'), (x_1,y_1),\dots$). Because the
+dealer chose the coefficients $a_1,\dots,a_{t-1}$ uniformly, every $s'$ is equally likely
+given the $t-1$ shares. Hence the conditional distribution of $s$ is uniform over
+$\mathbb{F}_q$; no information is leaked.
+
+\paragraph{From SSS to threshold signatures.}
+In a threshold signature scheme, the private signing key $\mathsf{sk}$ is taken as the
+secret $s$ and shared using SSS. To sign a message $m$, any $t$ parties each compute a
+\textit{partial signature} using their share and a public function (e.g., in Schnorr or
+ECDSA, the nonce is also shared). Lagrange interpolation is then applied \emph{in the
+exponent} of the cryptographic group to combine the partial signatures into a full
+signature. Because $\mathsf{sk}$ is never reconstructed, the scheme remains secure as
+long as fewer than $t$ parties are corrupted. The information‑theoretic security of SSS
+guarantees that $t-1$ corrupted parties gain no advantage in forging signatures.
+
+\vspace{0.2cm}
+\noindent
+The topic has direct practical relevance. Certificate authorities using threshold signing
+are more resilient to key theft. Cryptocurrency wallets that use threshold signatures
+(sometimes called ``multi-sig'') protect funds even if some signers are compromised.
+Distributed systems that need to produce signed messages for consensus, as in Byzantine
+fault-tolerant protocols, benefit from threshold signatures that can tolerate up to a
+third of the parties being malicious. In all of these settings, what is needed is a
+scheme that is efficient, non-interactive if possible, and comes with a proof of security
+rather than just heuristic arguments.
+
+Constructing such schemes turns out to be harder than it looks. The naive approach of
+having all $k$ parties compute partial signatures and combine them runs into the problem
+that the combination needs to reconstruct the private key implicitly, without any party
+ever computing it explicitly. For RSA-based signatures, this requires doing polynomial
+interpolation in a group whose order $\phi(n)$ is secret, which creates technical
+difficulties that derailed a decade of prior work. For discrete-log-based signatures, the
+inherent randomness in signing forces interaction among the parties to generate shared
+nonces. Getting around these obstacles requires non-trivial ideas.
+
+This report covers three papers that together give a solid picture of where threshold
+signature research stands.
+
+The first, Shoup's ``Practical Threshold Signatures'' \cite{Shoup00}, is a landmark
+result for threshold RSA. The scheme it presents is surprisingly simple, using little more than Shamir secret
+sharing and a scaling trick with $l!$ to bypass the $\phi(n)$-interpolation obstacle,
+yet it is the first to simultaneously achieve non-interactive signing, compact shares,
+and a rigorous proof of security under the RSA assumption. We study this paper in detail in Section~\ref{sec:paper1}, including both
+protocols and their security proofs.
+
+The second, Boldyreva's ``Threshold Signatures, Multisignatures and Blind Signatures
+Based on the Gap-Diffie-Hellman-Group Signature Scheme'' \cite{Bold03}, takes a
+different algebraic route by working in groups where the group order is public (GDH
+groups). This lets Lagrange interpolation work directly over $\mathbb{Z}_p$ without any
+scaling factor, removes the need for a trusted dealer by using distributed key
+generation, and eliminates zero-knowledge proofs from robustness checking. The paper
+also extends the same framework to multisignatures and blind signatures. We cover it in
+Section~\ref{sec:paper2}.
+
+The third, Komlo and Goldberg's ``FROST: Flexible Round-Optimized Schnorr Threshold
+Signatures'' \cite{FROST20}, tackles the round complexity problem for threshold Schnorr
+schemes. Prior work required three or more rounds per signing session due to the need
+for jointly generated nonces. FROST reduces this to two rounds (or one with a
+preprocessing phase) by using non-interactive additive secret sharing combined with
+per-participant binding factors that prevent adaptive attacks on the aggregated nonce.
+It has been standardised as RFC 9591 and adopted in practice. We cover it in
+Section~\ref{sec:frost_review}.
+
+Throughout, we try not just to describe the constructions but to explain the choices made
+specifically, why certain assumptions are needed, where the proofs are tight and where
+they are not, and what the gaps between theory and practice look like.

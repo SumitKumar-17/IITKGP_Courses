@@ -1,0 +1,29 @@
+\begin{abstract}
+\noindent
+Digital signatures provide authenticity, but they concentrate trust: a single private key
+held by a single party is a single point of failure. Threshold signature schemes
+distribute this trust across $n$ parties so that any $k$ of them can jointly produce a
+valid signature, while fewer than $k$ gain nothing useful even if they cooperate. This
+report surveys the topic of threshold signatures through three research papers that
+together cover the foundational constructions, their security proofs, and practical
+extensions.
+
+The first paper we study is Shoup's ``Practical Threshold Signatures'' (Eurocrypt 2000),
+which presents the first RSA-based threshold signature scheme that is simultaneously
+non-interactive, has compact shares, and comes with a rigorous security proof in the
+random oracle model. The second paper, Boldyreva's ``Threshold Signatures, Multisignatures and Blind
+Signatures Based on the Gap-Diffie-Hellman-Group Signature Scheme'' (PKC 2003),
+constructs a threshold scheme over GDH groups that avoids both the trusted dealer and
+the zero-knowledge proofs required by Shoup, at the cost of requiring pairing-friendly
+groups and a stricter $t < n/2$ corruption bound.
+The third paper, Komlo and Goldberg's ``FROST: Flexible Round-Optimized Schnorr Threshold
+Signatures'' (2020), addresses round efficiency by reducing threshold Schnorr signing to
+two rounds (or one with preprocessing), standardised as RFC 9591 and deployed in
+real-world systems such as Zcash.
+
+Together, these papers trace a line from basic constructions to more practical and
+expressive schemes, and show how the standard toolkit of Shamir secret sharing, Lagrange
+interpolation, and zero-knowledge proofs can be assembled to achieve a property that
+initially seems hard: splitting signing authority without any single party ever holding
+the full key.
+\end{abstract}

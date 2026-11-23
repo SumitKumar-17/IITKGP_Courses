@@ -1,0 +1,362 @@
+\section{Practical Threshold Signatures (Shoup, 2000)}
+\label{sec:paper1}
+
+\subsection{Background and What the Paper Does}
+
+The starting point for this paper is a natural problem: RSA signing in practice usually
+means one party holds the private key, and if that party is compromised or unavailable,
+everything breaks. Threshold signatures distribute the signing capability so that no
+single party holds the full key. Instead, $k$ out of $l$ parties must cooperate to
+sign, and any fewer than $k$ learn nothing useful even if they collude.
+
+The idea of threshold signatures had been around since Desmedt's work in 1987
+\cite{Des87}, and several schemes had been proposed over the years based on both discrete
+log and RSA. But as Shoup points out, all of them suffered from at least one of three
+problems: no rigorous security proof, interactive signing that requires a synchronous
+network, or signature shares whose size grows linearly in the number of players.
+
+The reason discrete-log-based schemes are stuck being interactive is fundamental to how
+they work. Schnorr, DSA, ElGamal-type signatures all require a fresh random nonce per
+signature, and generating that nonce jointly among $k$ parties requires interaction. There is no way around it. RSA, on the other hand, is deterministic once you fix the
+message hash, which makes non-interactive threshold signing plausible in principle.
+
+The problem people kept running into for threshold RSA was polynomial interpolation. The
+natural approach is to secret-share the private key $d$ using Shamir's scheme, where
+players hold shares $s_i = f(i) \bmod \phi(n)$ of a polynomial $f$ with $f(0) = d$, and
+combine using Lagrange interpolation in the exponent. But players don't know $\phi(n)$
+(knowing it would let them factor $n$), so you can't do arithmetic modulo $\phi(n)$.
+Previous work tried to work around this by changing the ring they interpolate over, which
+led to complicated schemes with large shares \cite{FD92, DDFY94}.
+
+Shoup's insight is that the interpolation-over-$\mathbb{Z}_{\phi(n)}$ problem is
+essentially a non-issue. You don't interpolate modulo $\phi(n)$; you do the interpolation
+over the integers, scaling by $\Delta = l!$ to clear denominators. The $\Delta$ factor
+then gets absorbed into the exponents during share combination, and everything works out.
+The scheme ends up being strikingly simple, simple enough that Shoup himself remarks
+it is ``truly amazing'' that it had not been proposed and analyzed before.
+
+\subsection{The Security Model}
+
+The setup has $l$ players, a trusted dealer, and an adversary. Two parameters control the
+scheme: $t$ is the maximum number of players the adversary can corrupt, and $k$ is the
+threshold (the minimum number of shares needed to produce a valid signature). The
+constraints $k \geq t + 1$ and $l - t \geq k$ are required, ensuring that the adversary
+never controls enough shares to sign on its own, and that the honest players always have
+enough shares to sign regardless.
+
+The adversary is \emph{static}: it decides which $t$ players to corrupt before the
+protocol begins. Once corrupted, those players' secret key shares are fully known to the
+adversary. During signing, the adversary can ask any uncorrupted player to sign any
+message, and it sees the resulting signature shares.
+
+The scheme is \textbf{non-forgeable} if the adversary cannot produce a valid signature on
+a message $M$ unless at least $k - t$ uncorrupted players were asked to sign $M$. When
+$k = t + 1$, this reduces to: no forged signature on any message that no honest player
+ever signed.
+
+The scheme is \textbf{robust} if a corrupted player cannot prevent signing from
+succeeding by submitting a bad share. The way robustness is achieved here is through
+share verification: each share comes with a non-interactive proof of correctness, so
+invalid shares are detected and discarded before combination.
+
+A threshold signature scheme in this model consists of three algorithms beyond the
+standard key generation: a share verification algorithm (checks that player $i$'s share
+on message $M$ is correctly formed), a signature verification algorithm (same as ordinary
+RSA), and a share combining algorithm (takes $k$ verified shares and outputs the final
+signature).
+
+\subsection{Protocol 1: The Basic Construction}
+
+\subsubsection{Dealer Setup}
+
+The dealer chooses safe primes $p = 2p' + 1$ and $q = 2q' + 1$, where $p'$ and $q'$ are
+also prime. Let $n = pq$ and $m = p'q'$. The RSA public exponent $e$ is chosen as a
+prime greater than $l$ (this constraint on $e$ is important and will matter in the
+combination step). The private key is $d$ satisfying $de \equiv 1 \pmod{m}$.
+
+The reason for safe primes is that they give $\mathbb{Z}_n^*$ a clean structure. By the
+Chinese Remainder Theorem, $\mathbb{Z}_n^* \cong \mathbb{Z}_{2p'} \times \mathbb{Z}_{2q'}
+\cong \mathbb{Z}_m \times \mathbb{Z}_2 \times \mathbb{Z}_2$. The subgroup of squares,
+$Q_n$, is then cyclic of order exactly $m = p'q'$. Working inside $Q_n$ is desirable
+because $m$ has no small prime factors, which is needed both for the DDH assumption to
+hold in $Q_n$ and for Lagrange interpolation to work (the relevant Vandermonde matrices
+are invertible modulo $m$).
+
+The dealer secret-shares $d$ using a degree-$(k-1)$ polynomial over $\mathbb{Z}$:
+\[
+    f(X) = d + a_1 X + a_2 X^2 + \cdots + a_{k-1} X^{k-1},
+\]
+where $a_1, \ldots, a_{k-1}$ are chosen uniformly at random from $\{0, \ldots, m-1\}$.
+Player $i$'s secret key share is:
+\[
+    s_i = f(i) \bmod m.
+\]
+Then the dealer picks a random element $v \in Q_n$, which serves as a base for
+verification keys. It sets $VK = v$ and $VK_i = v^{s_i}$ for each player $i$. The public
+key is $(n, e)$ and these verification keys are public; only $s_i$ goes privately to
+player $i$.
+
+\subsubsection{The $\Delta$ Trick and Lagrange Interpolation}
+
+Let $\Delta = l!$. For any $k$-element signing set $S \subseteq \{1, \ldots, l\}$ and
+any $i \in \{0, \ldots, l\} \setminus S$, $j \in S$, define:
+\[
+    \lambda_{i,j}^{S} = \Delta \cdot \frac{\prod_{j' \in S \setminus \{j\}} (i - j')}
+    {\prod_{j' \in S \setminus \{j\}} (j - j')}.
+\]
+This is the standard Lagrange coefficient scaled by $\Delta$. The denominator is a
+product of at most $k-1$ pairwise differences of integers from $\{1, \ldots, l\}$, so it
+divides $(l-1)!$, which in turn divides $\Delta = l!$. Hence $\lambda_{i,j}^S$ is always
+an integer. From the Lagrange interpolation formula, we get:
+\[
+    \Delta \cdot f(i) \equiv \sum_{j \in S} \lambda_{i,j}^{S} \cdot f(j) \pmod{m}.
+    \tag{3}
+\]
+Setting $i = 0$ gives $\Delta \cdot d \equiv \sum_{j \in S} \lambda_{0,j}^S \cdot s_j
+\pmod{m}$. The key point is that this identity holds over $\mathbb{Z}_m$, not over
+$\mathbb{Z}_{\phi(n)}$, and the players can compute everything on the right-hand side
+since they know their own $s_j$ and the public $\Delta$ and $S$.
+
+\subsubsection{Generating and Verifying Signature Shares}
+
+A valid RSA signature on message $M$ is a value $y$ satisfying $y^e \equiv H(M)
+\pmod{n}$, where $H$ is a hash function treated as a random oracle mapping messages to
+$\mathbb{Z}_n^*$. Let $x = H(M)$.
+
+Player $i$'s signature share is:
+\[
+    x_i = x^{2\Delta s_i} \bmod n. \tag{4}
+\]
+The exponent has two parts: the $\Delta$ is needed for the Lagrange interpolation to
+work, and the factor of $2$ forces $x_i$ into $Q_n$ (since squaring kills the
+$\mathbb{Z}_2 \times \mathbb{Z}_2$ part of $\mathbb{Z}_n^*$). Being in $Q_n$ is needed
+to make the proof of correctness sound.
+
+Along with the share, each player broadcasts a proof that $x_i$ is correctly formed. The
+statement to prove is:
+\[
+    \log_v(VK_i) = \log_{\bar{x}}(x_i^2),
+\]
+where $\bar{x} = x^{4\Delta}$. Both sides equal $s_i$. This is an equality of discrete
+logarithms in the same group $Q_n$, and Chaum and Pedersen \cite{CP92} gave an
+interactive proof for it. To make it non-interactive, player $i$ applies the Fiat-Shamir
+heuristic: pick a random $r \in \{0, \ldots, 2^{L(n) + 2L_1} - 1\}$ (where $L_1 = 128$
+is a secondary security parameter), compute:
+\[
+    v' = v^r, \quad x' = \bar{x}^r, \quad c = H'(v, \bar{x}, v_i, x_i^2, v', x'),
+    \quad z = s_i c + r,
+\]
+and publish $(z, c)$ as the proof. To verify a share $(x_i, (z,c))$, check that:
+\[
+    c = H'(v, \bar{x}, v_i, x_i^2, \; v^z \cdot v_i^{-c}, \; \bar{x}^z \cdot x_i^{-2c}).
+\]
+The whole process is non-interactive: player $i$ can compute and publish $(x_i, z, c)$
+without talking to anyone else.
+
+\subsubsection{Combining Shares into a Signature}
+
+Given $k$ valid shares from a set $S = \{i_1, \ldots, i_k\}$, verified using the share
+verification algorithm, compute:
+\[
+    w = \prod_{j \in S} x_j^{2\lambda_{0,j}^S} \bmod n.
+\]
+From equation~(3), substituting $x_j^2 = x^{4\Delta s_j}$:
+\[
+    w^e = x^{e \cdot \sum_{j \in S} 2\lambda_{0,j}^S \cdot \frac{s_j}{\text{(absorbed into exponent)}}}
+    = x^{4\Delta^2} = x^{e'}, \quad \text{where } e' = 4\Delta^2.
+\]
+Since $e$ is a prime greater than $l$, and $e' = 4(l!)^2$ only has prime factors $\leq
+l$, we have $\gcd(e, e') = 1$. Run the extended Euclidean algorithm to find integers $a,
+b$ with $e'a + eb = 1$, then set:
+\[
+    y = w^a \cdot x^b \bmod n.
+\]
+Then $y^e = w^{ea} \cdot x^{eb} = x^{e'a} \cdot x^{eb} = x^{e'a + eb} = x = H(M)$.
+So $y$ is a valid RSA signature, in exactly the standard format.
+
+\subsection{Protocol 2: Extending to $k \geq t + 1$}
+
+Protocol 1 is only analyzed for $k = t + 1$ in Theorem 1. For the more general case
+$k \geq t + 1$, Shoup modifies the construction as follows.
+
+Instead of $s_i = f(i) \bmod m$, the dealer computes:
+\[
+    s_i = f(i) \cdot \Delta^{-1} \bmod m,
+\]
+where $\Delta^{-1}$ exists modulo $m$ since $\gcd(\Delta, m) = 1$ (because all prime
+factors of $\Delta = l!$ are at most $l < e$, and $m = p'q'$ has only large prime
+factors). With this change, the share formula simplifies to $x_i = x^{2s_i}$, and the
+combination formula uses $e' = 4$ instead of $e' = 4\Delta^2$. The factor $\Delta$
+disappears from the public-facing parts of the protocol entirely.
+
+There is one additional adjustment: to handle Jacobi symbols cleanly, the dealer adds to
+the verification key an element $u \in \mathbb{Z}_n^*$ with Jacobi symbol $(u|n) = -1$.
+Before computing $x = H(M)$, the signer checks the Jacobi symbol of $H(M)$: if it is
+$-1$, multiply by $u^e$ to flip it to $+1$. This keeps $x \in J_n$ (elements with
+Jacobi symbol $+1$), which is needed for the group arithmetic to be consistent. The final
+signature is then adjusted accordingly by dividing out $u$ if necessary.
+
+Protocol 2 is actually simpler than Protocol 1 once you understand the role of $\Delta$.
+The $\Delta$ in Protocol 1 was there purely to make the integer interpolation work out,
+but it creates an annoyance where players are computing with huge exponents. Protocol 2
+moves the $\Delta$ adjustment into the setup (the key shares) rather than the signing,
+and the signing itself becomes cleaner.
+
+\subsection{Security Analysis}
+
+\subsubsection{Theorem 1: Security of Protocol 1 for $k = t + 1$}
+
+\begin{theorem}[\cite{Shoup00}]
+For $k = t + 1$, Protocol~1 is a secure threshold signature scheme (robust and
+non-forgeable) in the random oracle model for $H'$, assuming that the standard RSA
+signature scheme is secure.
+\end{theorem}
+
+\begin{proof}[Proof Sketch]
+The proof constructs a simulator that, given access to an RSA signing oracle (which
+computes $e$-th roots on demand), can simulate the entire view of the adversary without
+knowing the secret $d$.
+
+\medskip
+\noindent\textit{Simulating corrupted players' shares.}
+The simulator does not know the actual polynomial $f$. For the $t = k-1$ corrupted
+players $i_1, \ldots, i_{k-1}$, it picks their shares $s_{i_j}$ uniformly at random from
+$\{0, \ldots, \lfloor n/4 \rfloor - 1\}$. In the real scheme, shares are uniform in
+$\{0, \ldots, m-1\}$. The difference is that $n/4 - m = (p' + q')/2 + 1/4 = O(\sqrt{n})$,
+so the statistical distance between the two distributions is $O(n^{-1/2})$, which is
+negligible. This step is purely statistical: no computational assumption is needed.
+
+\medskip
+\noindent\textit{Simulating uncorrupted players' shares.}
+Once the corrupted shares $s_{i_j}$ are fixed, because $k = t+1$, the $k$ points
+$\{(0, d), (i_1, s_{i_1}), \ldots, (i_{k-1}, s_{i_{k-1}})\}$ completely determine the
+polynomial $f$. The shares for uncorrupted players are thus determined, but the simulator
+doesn't know $d$. It gets around this using the RSA oracle. Given an RSA signature $y$
+with $y^e = x$, the simulator can compute the share $x_i = x^{2\Delta s_i}$ for any
+uncorrupted player $i$ as:
+\[
+    x_i = y^{2\left(\lambda_{i,0}^{S} + e\left(\lambda_{i,i_1}^{S} s_{i_1} + \cdots +
+    \lambda_{i,i_{k-1}}^{S} s_{i_{k-1}}\right)\right)},
+\]
+where $S = \{0, i_1, \ldots, i_{k-1}\}$. This follows from equation~(3) and the fact
+that $y^e = x$ so the simulator can move between $x$-powers and $y$-powers. The
+verification keys $v_i = v^{s_i}$ are computed similarly.
+
+\medskip
+\noindent\textit{Simulating the proofs of correctness.}
+The simulator generates valid-looking proofs for uncorrupted players without knowing their
+$s_i$ directly. It chooses random $c$ and $z$, then programs the random oracle $H'$ to
+return $c$ at the point $(v, \bar{x}, v_i, x_i^2, v^z v_i^{-c}, \bar{x}^z x_i^{-2c})$.
+This is possible as long as the random oracle has not been queried at that point before,
+which holds except with negligible probability (since $c$ was chosen after $z$, and the
+hash input determines them).
+
+\medskip
+\noindent\textit{Soundness.}
+Suppose a corrupted player submits an incorrect share $x_i$ with a passing proof $(z, c)$.
+Since all elements are in $Q_n$ and $v$ generates $Q_n$, write $\bar{x} = v^\alpha$,
+$v_i = v^{s_i}$, $x_i^2 = v^\beta$ in the DL representation. If $x_i$ is wrong then
+$\beta \neq s_i \alpha$, so $\beta - s_i\alpha \not\equiv 0 \pmod{m}$. The verification
+equation then forces $c$ to satisfy a non-trivial linear equation modulo $p'$ or modulo
+$q'$. Since in the random oracle model the challenge $c = H'(\ldots)$ is uniformly
+distributed and independent, this happens only with probability $O(1/p') = O(n^{-1/2})$,
+which is negligible.
+
+\medskip
+\noindent\textit{Non-forgeability.}
+The non-forgeability reduction works as follows. Suppose an adversary $\mathcal{A}$
+forges a signature on some message $M$ with non-negligible probability $\epsilon$. We
+build a reduction that breaks RSA with probability close to $\epsilon$. The reduction
+runs the simulator above, answering all of $\mathcal{A}$'s queries. When $\mathcal{A}$
+outputs a forged signature $y^*$ on some fresh message $M^*$ with $y^{*e} = H(M^*)$,
+the reduction outputs $y^*$ as an $e$-th root of $H(M^*)$, breaking RSA. The
+zero-knowledge property of the simulated proofs ensures the adversary's view in the
+simulation is statistically close to its view in the real attack.
+\end{proof}
+
+\subsubsection{Theorem 2: Security of Protocol 2 for $k \geq t + 1$}
+
+\begin{theorem}[\cite{Shoup00}]
+In the random oracle model for both $H$ and $H'$, Protocol~2 is a secure threshold
+signature scheme for all $k \geq t + 1$ under the RSA and DDH assumptions. When
+$k = t + 1$, the DDH assumption is not needed.
+\end{theorem}
+
+The reason Protocol 1's proof breaks down for $k > t + 1$ is subtle. When $k > t+1$,
+the adversary controls $t$ players but needs $k > t+1$ shares to sign. This means that
+even the adversary's target message (the one it is trying to forge) may be requested
+for signing, and some honest players will contribute shares for it. The simulator in the
+Protocol 1 proof used the RSA oracle specifically when an honest player's share is
+requested, which works fine when those shares are determined by the corrupted shares plus
+$d$. But with $k > t+1$, there are more honest players than needed to pin the polynomial,
+and the simulator would need to commit to the honest players' shares before knowing which
+message will be the forgery target. This creates a circular dependency that breaks the
+Protocol 1 reduction.
+
+Shoup resolves this with a sequence of three simulators for Protocol 2.
+
+The \textbf{first simulator} handles everything the same way as before: corrupted shares
+are chosen at random, uncorrupted shares are derived using the RSA oracle. But it cannot
+generate shares for the target message when $k > t+1$ because it doesn't yet know which
+message the adversary will forge.
+
+The \textbf{second simulator} guesses the target message upfront (one of the random
+oracle queries), and for that message specifically, it generates the honest players'
+shares differently: instead of using $g^r$ as a base (where $g$ is the committed
+group element), it uses a separate random $h$. The DDH assumption says that the
+adversary cannot tell the difference between $(g, g^r, \ldots; h, h^r, \ldots)$ and
+$(g, g^r, \ldots; h, h^{b_1}, \ldots)$ where the $h$-exponents are independent. So the
+adversary's view in the second simulator is computationally indistinguishable from the
+first.
+
+The \textbf{third simulator} goes further: for the target message, it simply sets the
+hash output $\hat{x} = z$ for a random $z$ of its choice, and simulates the honest
+players' shares as random quadratic residues. If the adversary forges on the target
+message without querying too many shares from honest players (fewer than $k - t$ of
+them, as required by the definition), then the adversary has essentially computed an
+$e$-th root of a random element $z$ in $\mathbb{Z}_n^*$, which contradicts the RSA
+assumption.
+
+The DDH assumption is used to justify the move from the first to the second simulator,
+and is not needed when $k = t + 1$ because the circular dependency doesn't arise in
+that case.
+
+\subsection{Observations and Critique}
+
+The scheme is clean and the security proof is tight, but there are a few points worth
+thinking about.
+
+The most glaring practical limitation is the trusted dealer. The dealer knows both $d$
+(the full private key) and all the shares $s_i$. A compromised dealer breaks everything.
+This is not an academic concern: in the settings where threshold signatures are actually
+needed, like distributed key management for certificate authorities or blockchain
+multisig, a trusted setup is exactly what you want to avoid. Shoup does not address
+distributed key generation in this paper; it is treated as an orthogonal problem.
+
+The random oracle model is used in two places. For Protocol 1, it is only needed for the
+hash $H'$ used in the proof of correctness; the message hash $H$ could be replaced by a
+standard signature assumption. For Protocol 2, both $H$ and $H'$ are treated as random
+oracles in a more fundamental way (specifically, the simulator needs to control the
+outputs of $H$ to set up the target message). This is a stronger use of the random oracle
+model and is one of Shoup's stated motivations for calling Protocol 1 the preferred scheme
+when $k = t + 1$.
+
+The exponent $\Delta = l!$ in Protocol 1 is worth discussing. For $l = 20$ players,
+$\Delta = 20! \approx 2.4 \times 10^{18}$, which means the exponent $2\Delta s_i$ in
+the share generation is an enormous number even before reducing modulo $m$. In practice,
+you reduce modulo $m$ when computing, so the group operations are not affected by the
+size of $\Delta$ itself. But it does mean the exponents you work with in key generation
+and combination are large. Protocol 2 avoids this entirely by folding $\Delta^{-1}$ into
+the key shares at setup time, which is why Protocol 2 is sometimes preferred even in the
+$k = t+1$ case.
+
+The requirement that $e$ be prime and greater than $l$ is a departure from how RSA is
+usually used. Typically, $e = 65537$ is used for efficiency. If $l < 65537$, this is
+compatible; but for very large player sets it would force a larger $e$, which slows down
+verification. For the threshold applications Shoup had in mind (e.g., Byzantine agreement
+with tens to hundreds of nodes), this is not an issue.
+
+Overall, this paper is a genuine contribution: it identified that a major obstacle in
+prior work was actually not an obstacle, and the resulting scheme is simpler and more
+efficient than everything that came before it. The security proofs are rigorous and the
+reduction to standard assumptions (RSA, DDH) is clean.

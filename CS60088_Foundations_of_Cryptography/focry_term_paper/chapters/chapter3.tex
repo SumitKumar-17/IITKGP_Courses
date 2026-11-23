@@ -1,0 +1,190 @@
+\section{FROST: Flexible Round-Optimized Schnorr Threshold Signatures}
+\label{sec:frost_review}
+
+\subsection{Introduction and Motivation}
+
+Threshold signatures enable a group of \(n\) participants to collectively produce a signature, requiring at least \(t\) (the threshold) participants to cooperate. This primitive is essential for decentralised systems such as cryptocurrency wallets, certificate authorities, and blockchain consensus. Among signature schemes, Schnorr signatures are attractive for thresholdisation due to their linearity and provable security under the discrete logarithm (DL) assumption. However, prior threshold Schnorr schemes (Gennaro et al., 2003; Stinson and Strobl, 2001) required at least three communication rounds per signing operation, each involving broadcasts from all participants—a prohibitive overhead for network-limited or asynchronous environments.
+
+FROST (Flexible Round-Optimized Schnorr Threshold signatures), introduced by Komlo and Goldberg (2021), prioritises round efficiency over robustness. It achieves signing in two rounds (interactive) or a single round (with preprocessing) by replacing distributed key generation for each nonce with non-interactive additive secret sharing and share conversion (Cramer, Damgård, Ishai, 2005). Standardised as RFC 9591 (2024) for curves Ed25519, Ed448, P-256, Ristretto255, and secp256k1, FROST has seen adoption in Zcash and other platforms.
+
+This review provides a self-contained exposition of FROST: background, mathematical assumptions, complete proofs of correctness and security, efficiency analysis, an overview of the ROAST extension, and a critical conclusion.
+
+\subsection{Background and Prerequisites}
+
+\subsubsection{Notation}
+
+Let \(\mathbb{G}\) be a cyclic group of prime order \(q\) with generator \(g\). The DL problem: given \(g\) and \(g^x\), compute \(x\). Let \(H:\{0,1\}^*\to\mathbb{Z}_q^*\) be a random oracle. Participants \(P_i\) have identifiers \(i\in\{1,\ldots,n\}\). For a set \(S\) of \(t\) identifiers, the Lagrange coefficient is \(\lambda_{i,S}=\prod_{j\in S,j\neq i}\frac{j}{j-i}\bmod q\).
+
+\subsubsection{Shamir Secret Sharing}
+
+To share a secret \(s\in\mathbb{Z}_q\) with threshold \(t\), a dealer picks a random degree \(t-1\) polynomial \(f(x)=\sum_{k=0}^{t-1}a_kx^k\) with \(f(0)=s\). Each \(P_i\) gets share \(s_i=f(i)\). Any \(t\) parties reconstruct \(s=\sum_{i\in S}\lambda_{i,S}s_i\).
+
+\subsubsection{Additive Secret Sharing and Share Conversion}
+
+In a \(t\)-out-of-\(t\) additive scheme, each \(P_i\) chooses \(s_i\in_R\mathbb{Z}_q\) and the secret is \(s=\sum s_i\) (no interaction). Cramer, Damgård, Ishai (2005) give a non-interactive conversion to Shamir shares for \(n=t\): define \(g_{\{i\}}(x)=\prod_{j\neq i}\frac{j-x}{j}\). Then \(f(x)=\sum s_i g_{\{i\}}(x)\) has degree \(t-1\), \(f(0)=s\), and \(f(i)=s_i/\lambda_{i,S}\). Hence \(\lambda_{i,S}f(i)=s_i\) are additive shares. This conversion requires no communication.
+
+\subsubsection{Distributed Key Generation (DKG)}
+
+Pedersen’s DKG (Pedersen, 1991) allows \(n\) parties to jointly generate a secret without a trusted dealer. Each participant acts as a dealer in Feldman’s VSS (Feldman, 1987). In the first round, each broadcasts commitments to the coefficients of a random polynomial. In the second round, they distribute shares to other participants and verify consistency. The final share of \(P_i\) is the sum of received shares; the group public key is the product of all constant-term commitments. Gennaro et al. (2007) proved security under honest majority assumptions.
+
+\subsubsection{Schnorr Signatures}
+
+A Schnorr signature on \(m\) with secret key \(s\) and public key \(Y=g^s\) is: sample \(k\in_R\mathbb{Z}_q\), compute \(R=g^k\), \(c=H(m,R)\), \(z=k+s\cdot c\bmod q\), output \(\sigma=(z,c)\). Verification checks \(c\stackrel{?}{=}H(m,g^zY^{-c})\).
+
+\subsection{The FROST Threshold Signature Scheme}
+
+\subsubsection{Assumptions}
+
+FROST assumes: (i) participants validate messages before signing; (ii) reliable message delivery; (iii) authenticated participant identifiers. A semi-trusted \emph{signature aggregator} \(\mathcal{A}\) coordinates signing but cannot forge or learn keys; malicious \(\mathcal{A}\) can only cause denial of service.
+
+\subsubsection{Key Generation (Ped-DKG)}
+
+The key generation protocol proceeds in two rounds. In the first round, each participant \(P_i\) picks a random degree \(t-1\) polynomial \(f_i(x)=\sum_{j=0}^{t-1}a_{ij}x^j\) and broadcasts a commitment vector \(\vec{X}_i = \langle g^{a_{i0}},\ldots,g^{a_{i(t-1)}}\rangle\) to all other participants. In the second round, each \(P_i\) securely sends the share \(f_i(j)\) to each other participant \(P_j\). Upon receiving a share from \(P_j\), participant \(P_i\) verifies it using the public commitments:
+\[
+g^{f_j(i)}\stackrel{?}{=}\prod_{k=0}^{t-1}\phi_{jk}^{i^k\bmod q},
+\]
+where \(\phi_{jk}=g^{a_{jk}}\). If verification fails, the protocol aborts and the misbehaving participant is investigated out-of-band. Otherwise, each participant computes their long-lived secret share as \(s_i=\sum_{j=1}^n f_j(i)\). The group public key is \(Y=\prod_{j=1}^n g^{a_{j0}}\), and each participant's public verification share is \(Y_i=g^{s_i}\).
+
+\subsubsection{Two-Round Interactive Signing}
+
+The signing protocol uses two rounds. Let \(S\) be the set of \(t\) participants selected for signing. To prevent concurrent-session attacks, each participant generates two nonces: a hiding nonce \(d_i\) and a binding nonce \(e_i\).
+
+In the first round, the signature aggregator \(\mathcal{A}\) requests commitment shares from each participant in \(S\). Each \(P_i\) samples fresh nonces \(d_i,e_i\in_R\mathbb{Z}_q\), computes the corresponding public commitment shares \(D_i=g^{d_i}\) and \(E_i=g^{e_i}\), returns \((D_i,E_i)\) to \(\mathcal{A}\), and stores \((d_i,e_i,D_i,E_i)\) locally.
+
+In the second round, \(\mathcal{A}\) computes the group commitments \(R=\prod_{i\in S}D_i\) and \(R'=\prod_{i\in S}E_i\). It then sends the tuple \((m,R,R',S)\) to each \(P_i\). Each participant validates the message \(m\); if invalid, they abort. They compute the challenge \(c=H(m,R)\) and the binding factor \(\rho_i = H(m, R, R', i)\). Then they compute their response share as
+\[
+z_i = d_i + e_i \cdot \rho_i + c \cdot \lambda_{i,S} \cdot s_i \bmod q.
+\]
+After computing \(z_i\), they securely delete \((d_i,e_i)\) and return \(z_i\) to \(\mathcal{A}\).
+
+The aggregator verifies each response share by checking
+\[
+g^{z_i} \stackrel{?}{=} D_i \cdot E_i^{\rho_i} \cdot Y_i^{c\lambda_{i,S}}.
+\]
+If any check fails, the aggregator identifies and reports the misbehaving participant and aborts. If all checks pass, \(\mathcal{A}\) computes the group response \(z = \sum_{i\in S} z_i\) and outputs the signature \(\sigma = (z, c)\).
+
+\textbf{Correctness:} The hiding nonces \(d_i\) are additive shares of \(k_{\text{hide}}=\sum d_i\), and the binding nonces \(e_i\) contribute \(\sum e_i\rho_i\). The effective nonce is \(k = k_{\text{hide}} + \sum e_i\rho_i\). By share conversion, \(\lambda_{i,S}s_i\) are additive shares of the long-term secret \(s\). Then \(z = \sum d_i + \sum e_i\rho_i + c \sum \lambda_{i,S}s_i = k + s c\), matching the single-party Schnorr signing equation.
+
+\subsubsection{Single-Round Signing with Preprocessing}
+
+To achieve a single round of interaction, FROST introduces an optional non-interactive batched preprocessing stage. In the preprocessing stage, each participant \(P_i\) generates \(\zeta\) pairs of nonce-commitment tuples \((d_{ij}, e_{ij}, D_{ij}, E_{ij})\) for \(j=1,\ldots,\zeta\), where \(d_{ij},e_{ij}\in_R\mathbb{Z}_q\), \(D_{ij}=g^{d_{ij}}\), \(E_{ij}=g^{e_{ij}}\). The participant stores these tuples locally and publishes the list of commitment shares \(\{(D_{ij},E_{ij})\}\) (along with their identifier \(i\)) to a commitment server. The commitment server stores these values for future signing operations, deleting or marking as used each commitment once it is served.
+
+When a signature on message \(m\) is required, the aggregator \(\mathcal{A}\) fetches the next unused commitment share pair \((D_{ij},E_{ij})\) for each participant in the selected set \(S\) from the commitment server. The server returns these values and removes them to prevent reuse. \(\mathcal{A}\) computes the group commitments \(R=\prod_{i\in S}D_{ij}\) and \(R'=\prod_{i\in S}E_{ij}\), then sends \((m,R,R',S,D_{ij},E_{ij})\) to each \(P_i\). Each participant verifies that \(D_{ij}\) and \(E_{ij}\) correspond to valid unused nonces (i.e., that they have not been deleted or used before). If verification fails, the participant aborts and requests a restart. Otherwise, the protocol proceeds exactly as in the second round of the two-round variant: each participant computes \(c=H(m,R)\), \(\rho_i = H(m,R,R',i)\), then \(z_i = d_{ij} + e_{ij}\rho_i + \lambda_{i,S}s_i c\), deletes the nonce pair, and returns \(z_i\) to \(\mathcal{A}\). The aggregator verifies and aggregates as before. Because the first round is eliminated, signing becomes a single round of communication, and participants can respond asynchronously.
+
+\subsection{Mathematical Proofs of Security}
+
+\subsubsection{Assumptions}
+
+\begin{definition}[Discrete Logarithm Problem (DL)]
+Given \(g\) and \(h=g^x\) for unknown \(x\in_R\mathbb{Z}_q\), no probabilistic polynomial-time algorithm outputs \(x\) with non-negligible probability.
+\end{definition}
+
+\begin{definition}[One-More Discrete Logarithm (OMDL)]
+An adversary with access to a challenge oracle (providing random group elements) and a solution oracle (returning discrete logarithms) cannot solve \(\ell+1\) challenges with only \(\ell\) queries to the solution oracle.
+\end{definition}
+
+Adaptive security proofs may also use the Algebraic Group Model (AGM), where adversaries must represent each group element as a linear combination of previously seen elements.
+
+\subsubsection{Correctness Proof}
+
+\begin{theorem}[Correctness]
+If all participants follow the FROST signing protocol honestly, the resulting signature \(\sigma=(z,c)\) satisfies the Schnorr verification equation.
+\end{theorem}
+\begin{proof}
+Let \(f_1(x)\) be the polynomial defined during key generation such that \(f_1(0)=s\) (the group secret) and \(f_1(i)=s_i\) (the long-lived secret share of \(P_i\)). Let \(f_2(x)\) be the polynomial constructed from the additive hiding nonce shares via share conversion, satisfying \(f_2(0)=\sum d_i\) and \(f_2(i)=d_i/\lambda_{i,S}\). Similarly, let \(f_3(x)\) be the polynomial from binding nonce shares with \(f_3(0)=\sum e_i\) and \(f_3(i)=e_i/\lambda_{i,S}\).
+
+Define the effective nonce \(k = f_2(0) + \sum_{i\in S} \lambda_{i,S} f_3(i) \rho_i\). The binding factors \(\rho_i\) are publicly derived from the message and all commitments. Each participant computes \(z_i = d_i + e_i\rho_i + \lambda_{i,S}s_i c = \lambda_{i,S}(f_2(i) + f_3(i)\rho_i + c f_1(i))\). The aggregator computes \(z = \sum_{i\in S} z_i = \sum_{i\in S} \lambda_{i,S}(f_2(i) + f_3(i)\rho_i + c f_1(i))\). By Lagrange interpolation, \(\sum \lambda_{i,S} f_2(i) = f_2(0)\), \(\sum \lambda_{i,S} f_3(i)\rho_i = \sum e_i\rho_i\) (since \(\rho_i\) are public constants), and \(\sum \lambda_{i,S} f_1(i) = f_1(0)=s\). Hence \(z = f_2(0) + \sum e_i\rho_i + c s = k + s c\). Verification then gives:
+\[
+g^z \cdot Y^{-c} = g^{k+sc} \cdot g^{-sc} = g^k = \left(\prod_{i\in S} D_i\right) \cdot \left(\prod_{i\in S} E_i^{\rho_i}\right) = R \cdot \prod E_i^{\rho_i},
+\]
+which is consistent with the challenge computation because \(c = H(m,R)\) and the binding factors are derived from \(m,R,R'\). Thus the signature verifies correctly.
+\end{proof}
+
+\subsubsection{Unforgeability (EUF-CMA)}
+
+\begin{theorem}[EUF-CMA Security]
+If the discrete logarithm problem is hard in \(\mathbb{G}\), then FROST is existentially unforgeable under adaptive chosen-message attacks when the adversary controls fewer than \(t\) participants.
+\end{theorem}
+\begin{proof}[Proof Sketch]
+The proof reduces the security of FROST to that of single-party Schnorr signatures. Let \(\mathcal{A}_{\text{Thresh}}\) be an adversary against FROST that controls at most \(t-1\) participants. We construct an adversary \(\mathcal{A}_{\text{Schnorr}}\) against the single-party Schnorr scheme.
+
+\(\mathcal{A}_{\text{Schnorr}}\) receives a challenge public key \(Y^*\) and simulates the entire FROST environment for \(\mathcal{A}_{\text{Thresh}}\). For key generation, \(\mathcal{A}_{\text{Schnorr}}\) sets the group public key to \(Y^*\). For the \(t-1\) corrupted participants, it chooses random secret shares. For the single honest participant, it implicitly defines the share as the difference between \(Y^*\) and the contributions of corrupted parties, using the homomorphic property of Pedersen commitments.
+
+When \(\mathcal{A}_{\text{Thresh}}\) requests a signature on a message \(m\), \(\mathcal{A}_{\text{Schnorr}}\) queries its own signing oracle to obtain a single-party Schnorr signature \((z,c)\) on \(m\). It then simulates the FROST signing protocol: it generates random nonce shares \((d_i,e_i)\) for the corrupted participants, computes the group commitments \(R,R'\) from these simulated shares, and ensures consistency with the challenge \(c\) by programming the random oracle \(H\) appropriately (setting \(H(m,R)=c\) and defining binding factors \(\rho_i\) accordingly).
+
+If \(\mathcal{A}_{\text{Thresh}}\) outputs a valid FROST forgery \((z^*,c^*)\) on a new message \(m^*\) (one never signed before), the reduction extracts a valid Schnorr forgery by reconstructing the honest participant's contribution. Because the adversary controls fewer than \(t\) parties, at least one honest participant contributed to the forgery, and the extraction succeeds. The probability of success of \(\mathcal{A}_{\text{Schnorr}}\) is polynomially related to that of \(\mathcal{A}_{\text{Thresh}}\). Since the DL assumption implies that single-party Schnorr is unforgeable, the advantage of \(\mathcal{A}_{\text{Thresh}}\) must be negligible. The full proof requires careful handling of the random oracle and the algebraic properties of share conversion.
+\end{proof}
+
+\subsubsection{Adaptive Security Considerations}
+
+The original FROST security proof assumes a static corruption model, where the adversary chooses which participants to corrupt before the protocol begins. Crites and Stewart (2025) demonstrated that this proof does not extend to adaptive adversaries, where corruption can occur after seeing protocol messages. Later, Crites, Katz, Komlo, Tessaro, and Zhu (2025) proved adaptive security for a variant of FROST under the algebraic one-more discrete logarithm (A-OMDL) assumption combined with the low-dimensional vector representation (LDVR) problem, all within the algebraic group model. These assumptions remain non-standard, and achieving adaptive security under standard DL assumptions remains an open problem.
+
+\subsection{Security and Efficiency Analysis}
+
+\subsubsection{Security Properties}
+
+FROST provides unforgeability (under the DL assumption), privacy of individual secret shares, and identifiable aborts. It explicitly trades away \emph{robustness}: if any participant misbehaves (e.g., sends an incorrect response share), the protocol aborts rather than attempting to continue with the remaining honest participants. This design is justified for use cases where misbehaviour is rare and can be investigated out-of-band, such as single-owner device groups or environments where abort triggers immediate investigation.
+
+An important nuance regarding security levels was identified by Bellare, Tessaro, and Zhu (2022). They defined a hierarchy of unforgeability notions for threshold signatures, ranging from TS-SUF-0 (weakest) to TS-SUF-4 (strongest). The original FROST specification (often called FROST1) achieves TS-SUF-3, which is a strong level of unforgeability. However, a later optimized variant (FROST2), introduced to reduce the number of exponentiations required per signer, inadvertently degrades to TS-SUF-2, providing weaker security guarantees. Implementers should be aware that not all FROST variants offer the same security level; the RFC 9591 standard follows the original FROST1 design.
+
+\subsubsection{Efficiency Comparison}
+
+The following table compares FROST with prior threshold Schnorr schemes in terms of communication rounds, message complexity, and robustness.
+
+\begin{center}
+\begin{tabular}{|l|c|c|c|}
+\hline
+\textbf{Scheme} & \textbf{Signing Rounds} & \textbf{Message Complexity} & \textbf{Robust} \\
+\hline
+Gennaro et al. (2003) & 3 & \(O(n^2)\) per round & Yes \\
+Stinson-Strobl (2001) & \(\ge 4\) & \(O(n^2)\) per round & Yes \\
+FROST (2-round) & 2 & \(O(t)\) (aggregator) & No \\
+FROST (1-round w/ prep) & 1 & \(O(t)\) (aggregator) & No \\
+\hline
+\end{tabular}
+\end{center}
+
+For a signing operation involving \(t\) participants, FROST requires:
+\begin{itemize}
+    \item \textbf{Communication}: The aggregator sends \(O(t)\) messages in each round and receives \(O(t)\) responses. This contrasts with broadcast-based schemes where each participant sends \(O(n)\) messages per round, totalling \(O(n^2)\).
+    \item \textbf{Computation}: Each participant performs a constant number of exponentiations per signing (two for \(D_i,E_i\), one for the response share, and verification of incoming shares). The aggregator performs \(O(t)\) exponentiations for verification.
+    \item \textbf{Preprocessing}: The single-round variant requires offline generation of nonce-commitment pairs. This trades storage and preprocessing latency for lower online latency.
+\end{itemize}
+
+\subsubsection{Drawbacks and Limitations}
+
+FROST exhibits several limitations identified in subsequent literature:
+\begin{enumerate}
+    \item \textbf{Preprocessing Dependence}: The single-round variant requires a reliable commitment server. If the server fails or serves stale commitments, the protocol may abort or cause nonce reuse.
+    \item \textbf{Lack of Proactive Security}: FROST does not support periodic refresh of secret shares. In long-term deployments, gradual compromise of shares cannot be remedied without re-running key generation.
+    \item \textbf{Static Participants}: The protocol assumes a fixed set of participants after key generation. Dynamic joins or removals are not supported.
+    \item \textbf{No Public Accountability}: Misbehaviour only causes an abort; there is no mechanism to publicly blame a malicious participant without revealing secrets.
+    \item \textbf{Static Corruption Model}: The original security proof assumes a fixed set of corrupted participants before the protocol starts, which is insufficient for adaptive adversaries.
+    \item \textbf{No Post-Quantum Security}: FROST relies on the discrete logarithm problem, which is vulnerable to quantum attacks (Shor's algorithm).
+\end{enumerate}
+
+\subsection{Overview of ROAST}
+
+ROAST (Robust Asynchronous Schnorr Threshold Signatures), introduced by Ruffing, Ronge, Jin, Schneider-Bensch, and Schröder at CCS 2022, is an extension that addresses FROST's lack of robustness. ROAST operates as a wrapper around FROST, enabling signing to continue despite misbehaving participants.
+
+ROAST adds the following features to FROST:
+\begin{itemize}
+    \item \textbf{Asynchronous Operation}: Multiple concurrent signing sessions are supported. Participants can be slow or temporarily offline without blocking the protocol.
+    \item \textbf{Robustness via Redundancy}: By generating a sufficient number of preprocessed nonce-commitment pairs, ROAST can discard contributions from misbehaving participants and still complete the signature using any \(t\) honest participants.
+    \item \textbf{Identifiable Aborts with Continuation}: Malicious participants are identified and excluded, but the protocol does not abort; it continues with the remaining honest participants.
+\end{itemize}
+
+The ROAST protocol modifies the preprocessing stage to produce an excess of nonce pairs. When a participant sends an invalid response share, the aggregator simply requests a fresh nonce from that participant (or from a replacement) using a different preprocessed commitment. Because preprocessing is batched, this can be done without starting a new signing round.
+
+Trade-offs of ROAST include:
+\begin{itemize}
+    \item Higher computational overhead from managing concurrent sessions and redundant nonces.
+    \item Increased communication complexity due to additional messages for requesting replacement nonces.
+    \item Weaker unforgeability guarantees: Bellare, Tessaro, and Zhu (2022) showed that while original FROST1 achieves TS-SUF-3, ROAST only achieves TS-SUF-2.
+\end{itemize}
+
+ROAST is particularly suitable for asynchronous environments where participants may have unreliable connectivity, such as decentralised networks, blockchain validators, and IoT systems with intermittent connectivity.
+
+\subsection{Conclusion and Future Research Directions}
+
+FROST advances threshold Schnorr signatures by reducing signing rounds to two (or one with preprocessing) via non-interactive additive secret sharing and share conversion. Its standardisation as RFC 9591 enables practical deployment in systems like Zcash. However, its lack of robustness, adaptive security (recently addressed only under non-standard assumptions), proactive refresh, and dynamic participant management limits long-term use. Open problems include: constructing adaptively secure FROST under standard DL assumptions; post-quantum lattice or hash-based variants; efficient dynamic threshold and proactive secret sharing; accountable robustness with public blame; formal verification; and standardisation of robust extensions like ROAST. Addressing these will make FROST suitable for a broader range of critical applications.
