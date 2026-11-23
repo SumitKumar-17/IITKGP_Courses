@@ -1,0 +1,38 @@
+{
+  "sigma_0.4": {
+    "classifier_A": {
+      "train_accuracy": 0.669875,
+      "train_p_rule": 91.93118953627676,
+      "train_covariance": 0.00016823508614261984,
+      "test_accuracy": 0.658,
+      "test_p_rule": 93.52658486707568,
+      "test_covariance": 0.003084168050294441
+    },
+    "classifier_B": {
+      "train_accuracy": 0.98575,
+      "train_p_rule": 19.848932680933032,
+      "train_covariance": 4.536202391157383,
+      "test_accuracy": 0.9845,
+      "test_p_rule": 20.851304096147732,
+      "test_covariance": 4.517126844275094
+    }
+  },
+  "sigma_0.7": {
+    "classifier_A": {
+      "train_accuracy": 0.669625,
+      "train_p_rule": 91.99618718329228,
+      "train_covariance": 2.0280807105934162e-05,
+      "test_accuracy": 0.6575,
+      "test_p_rule": 94.26090200630077,
+      "test_covariance": 0.002945472409223987
+    },
+    "classifier_B": {
+      "train_accuracy": 0.982375,
+      "train_p_rule": 19.767574359112757,
+      "train_covariance": 4.276064948217294,
+      "test_accuracy": 0.9805,
+      "test_p_rule": 20.802473985301784,
+      "test_covariance": 4.25807153093131
+    }
+  }
+}

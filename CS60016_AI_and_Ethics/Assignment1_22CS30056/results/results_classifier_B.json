@@ -1,0 +1,206 @@
+{
+  "synthetic_pi": {
+    "gamma_0.0": {
+      "train_accuracy": 0.954,
+      "train_p_rule": 0.043097270640766586,
+      "train_covariance": -2.2806129650175464,
+      "test_accuracy": 0.948,
+      "test_p_rule": 100.0,
+      "test_covariance": -2.251223873415757
+    },
+    "gamma_0.5": {
+      "train_accuracy": 0.95275,
+      "train_p_rule": 0.04345466264120221,
+      "train_covariance": -2.2248884281285566,
+      "test_accuracy": 0.949,
+      "test_p_rule": 100.0,
+      "test_covariance": -2.1968035564195136
+    },
+    "gamma_1.0": {
+      "train_accuracy": 0.95225,
+      "train_p_rule": 100.0,
+      "train_covariance": -2.1703744214659424,
+      "test_accuracy": 0.9495,
+      "test_p_rule": 100.0,
+      "test_covariance": -2.1429033523756607
+    },
+    "gamma_1.5": {
+      "train_accuracy": 0.951875,
+      "train_p_rule": 100.0,
+      "train_covariance": -2.1460086197781405,
+      "test_accuracy": 0.9485,
+      "test_p_rule": 100.0,
+      "test_covariance": -2.1185046608580897
+    }
+  },
+  "synthetic_pi_2": {
+    "gamma_0.0": {
+      "train_accuracy": 0.95275,
+      "train_p_rule": 95.43644035860493,
+      "train_covariance": 0.27560838046672037,
+      "test_accuracy": 0.955,
+      "test_p_rule": 94.18825159260983,
+      "test_covariance": 0.3250236686740195
+    },
+    "gamma_0.5": {
+      "train_accuracy": 0.950375,
+      "train_p_rule": 98.62503895047709,
+      "train_covariance": 0.22329552851185722,
+      "test_accuracy": 0.954,
+      "test_p_rule": 95.77052372040636,
+      "test_covariance": 0.2747937510392445
+    },
+    "gamma_1.0": {
+      "train_accuracy": 0.950125,
+      "train_p_rule": 99.2119118434908,
+      "train_covariance": 0.18086668631501793,
+      "test_accuracy": 0.953,
+      "test_p_rule": 96.1339792183965,
+      "test_covariance": 0.22721265236545926
+    },
+    "gamma_1.5": {
+      "train_accuracy": 0.94825,
+      "train_p_rule": 99.28738182146495,
+      "train_covariance": 0.1413254369179441,
+      "test_accuracy": 0.951,
+      "test_p_rule": 96.9301198330416,
+      "test_covariance": 0.1861433705658059
+    }
+  },
+  "synthetic_pi_4": {
+    "gamma_0.0": {
+      "train_accuracy": 0.95175,
+      "train_p_rule": 21.203608230212584,
+      "train_covariance": 2.253698227227791,
+      "test_accuracy": 0.9435,
+      "test_p_rule": 19.41762946524058,
+      "test_covariance": 2.295688565162539
+    },
+    "gamma_0.5": {
+      "train_accuracy": 0.95,
+      "train_p_rule": 20.904880229119534,
+      "train_covariance": 2.188169306482406,
+      "test_accuracy": 0.944,
+      "test_p_rule": 19.294640344416703,
+      "test_covariance": 2.2291843105367652
+    },
+    "gamma_1.0": {
+      "train_accuracy": 0.949625,
+      "train_p_rule": 20.816471447790022,
+      "train_covariance": 2.1450915257960843,
+      "test_accuracy": 0.945,
+      "test_p_rule": 19.12455506596271,
+      "test_covariance": 2.1853368070685293
+    },
+    "gamma_1.5": {
+      "train_accuracy": 0.949125,
+      "train_p_rule": 21.00477959972139,
+      "train_covariance": 2.1033258506592185,
+      "test_accuracy": 0.9445,
+      "test_p_rule": 19.403037200284214,
+      "test_covariance": 2.1433524375184856
+    }
+  },
+  "synthetic_pi_6": {
+    "gamma_0.0": {
+      "train_accuracy": 0.957625,
+      "train_p_rule": 9.733703310504133,
+      "train_covariance": 2.684464025833935,
+      "test_accuracy": 0.9415,
+      "test_p_rule": 10.505518600474849,
+      "test_covariance": 2.7103092123419246
+    },
+    "gamma_0.5": {
+      "train_accuracy": 0.956125,
+      "train_p_rule": 9.616722474868654,
+      "train_covariance": 2.6105080320874077,
+      "test_accuracy": 0.941,
+      "test_p_rule": 10.194689548186057,
+      "test_covariance": 2.635305403722546
+    },
+    "gamma_1.0": {
+      "train_accuracy": 0.95575,
+      "train_p_rule": 9.54746648905795,
+      "train_covariance": 2.5580026703304566,
+      "test_accuracy": 0.941,
+      "test_p_rule": 9.978880675818374,
+      "test_covariance": 2.582182968877025
+    },
+    "gamma_1.5": {
+      "train_accuracy": 0.954125,
+      "train_p_rule": 9.418395611761216,
+      "train_covariance": 2.5315064706182104,
+      "test_accuracy": 0.941,
+      "test_p_rule": 9.867798516161768,
+      "test_covariance": 2.5552228538945974
+    }
+  },
+  "synthetic_pi_8": {
+    "gamma_0.0": {
+      "train_accuracy": 0.9525,
+      "train_p_rule": 8.200053887253631,
+      "train_covariance": 2.7503650113711324,
+      "test_accuracy": 0.945,
+      "test_p_rule": 8.058106510183558,
+      "test_covariance": 2.692831972186833
+    },
+    "gamma_0.5": {
+      "train_accuracy": 0.952625,
+      "train_p_rule": 7.975527968474871,
+      "train_covariance": 2.675486961752239,
+      "test_accuracy": 0.9425,
+      "test_p_rule": 7.784587328587703,
+      "test_covariance": 2.6197360431394823
+    },
+    "gamma_1.0": {
+      "train_accuracy": 0.951375,
+      "train_p_rule": 7.755704686389249,
+      "train_covariance": 2.616704818069849,
+      "test_accuracy": 0.942,
+      "test_p_rule": 7.366619556823774,
+      "test_covariance": 2.562126672189733
+    },
+    "gamma_1.5": {
+      "train_accuracy": 0.952875,
+      "train_p_rule": 7.927312874373234,
+      "train_covariance": 2.6007905022651485,
+      "test_accuracy": 0.942,
+      "test_p_rule": 7.686782251217659,
+      "test_covariance": 2.5465374416555244
+    }
+  },
+  "adult": {
+    "gamma_0.0": {
+      "train_accuracy": 0.849380014587892,
+      "train_p_rule": 32.22860747010061,
+      "train_covariance": 0.3857020429675168,
+      "test_accuracy": 0.847808764940239,
+      "test_p_rule": 32.314794429882674,
+      "test_covariance": 0.3831862847719701
+    },
+    "gamma_0.5": {
+      "train_accuracy": 0.836383528943704,
+      "train_p_rule": 57.78861942279681,
+      "train_covariance": 2.1884662076583913e-06,
+      "test_accuracy": 0.8351925630810093,
+      "test_p_rule": 57.11773503104782,
+      "test_covariance": 0.08589979015500229
+    },
+    "gamma_1.0": {
+      "train_accuracy": 0.8228234201975996,
+      "train_p_rule": 84.97250856811546,
+      "train_covariance": 4.137984169287275e-09,
+      "test_accuracy": 0.8226427622841965,
+      "test_p_rule": 86.29752065910185,
+      "test_covariance": 0.05833402961095879
+    },
+    "gamma_1.5": {
+      "train_accuracy": 0.8163251773755056,
+      "train_p_rule": 35.806042641401184,
+      "train_covariance": -5.725625262388649e-09,
+      "test_accuracy": 0.8143426294820717,
+      "test_p_rule": 36.20373463201271,
+      "test_covariance": -19.286361088580705
+    }
+  }
+}
